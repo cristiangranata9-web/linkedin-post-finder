@@ -1,0 +1,22 @@
+# Blueprint per il deploy automatico su Render (https://render.com).
+# Su Render: "New +" -> "Blueprint" -> collega questo repository.
+# Render leggerà questo file e configurerà da solo build/start command e root
+# directory. L'unica cosa che dovrai inserire manualmente è il valore della
+# variabile d'ambiente CRUSTDATA_API_KEY (per questo qui sotto è "sync: false":
+# Render la chiederà nel pannello invece di prenderla dal repository, così la
+# chiave non finisce mai nel codice versionato).
+services:
+  - type: web
+    name: linkedin-post-finder
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CRUSTDATA_API_KEY
+        sync: false
+      - key: FRONTEND_ORIGIN
+        value: "*"
+      - key: APP_PASSWORD
+        sync: false
