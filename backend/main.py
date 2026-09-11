@@ -46,7 +46,7 @@ from excel_utils import (
     read_topics_from_editorial_plan_xlsx,
 )
 
-async def _with_rate_limit_retry(coro_fn, *, max_attempts: int = 4, base_delay: float = 8.0):
+async def _with_rate_limit_retry(coro_fn, *, max_attempts: int = 6, base_delay: float = 15.0):
     """Esegue `coro_fn()` ritentando con backoff se Crustdata risponde 429
     (rate limit). Non nasconde altri errori: solo il 429 viene ritentato,
     tutto il resto (404, 401, altri 4xx/5xx) viene propagato subito."""
@@ -349,10 +349,10 @@ async def _process_company_job(job_id: str):
     async with httpx.AsyncClient() as client:
         for idx, company in enumerate(companies, start=1):
             if idx > 1:
-                # Piccola pausa tra un'azienda e l'altra per non saturare il
-                # rate limit di Crustdata (ogni azienda può generare più di
-                # una chiamata a /company/identify).
-                await asyncio.sleep(1.5)
+                # Pausa tra un'azienda e l'altra per non saturare il rate
+                # limit di Crustdata (ogni azienda può generare più di una
+                # chiamata a /company/identify).
+                await asyncio.sleep(3.0)
             yield _sse("progress", {"index": idx, "total": total, "email": company, "message": "Ricerca pagina LinkedIn azienda..."})
 
             giorni: dict[str, list[str]] = {g: [] for g in GIORNI_IT}

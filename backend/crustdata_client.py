@@ -22,6 +22,7 @@ viene propagata un'eccezione con un messaggio esplicito.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import unicodedata
@@ -408,6 +409,7 @@ async def v2_company_identify(client: httpx.AsyncClient, company_name: str) -> R
     if exact_matches:
         return _evaluate_matches(exact_matches)
 
+    await asyncio.sleep(1.0)
     fuzzy_matches = await _company_identify_call(client, clean_name, exact_match=False)
     target = _normalize_for_compare(clean_name)
     filtered = [m for m in fuzzy_matches if m.name and _normalize_for_compare(m.name) == target]
