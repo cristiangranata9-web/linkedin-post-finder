@@ -45,16 +45,33 @@ def read_emails_from_xlsx(file_bytes: bytes, filename: str = "file.xlsx") -> lis
         raise InputFileError("Il file è vuoto.")
 
     header = [str(c).strip() if c is not None else "" for c in rows[0]]
-    try:
-        email_col = next(i for i, h in enumerate(header) if h.lower() == "email")
-    except StopIteration as exc:
-        raise InputFileError(
-            "Non trovo una colonna intestata 'Email' nel file caricato. "
-            f"Intestazioni trovate: {header}"
-        ) from exc
+    email_col = next((i for i, h in enumerate(header) if h.lower() == "email"), None)
+
+    if email_col is not None:
+        data_rows = rows[1:]
+    else:
+        # Nessuna intestazione "Email": il file potrebbe essere un semplice
+        # elenco di indirizzi senza riga di intestazione (prima riga già
+        # dato). Si cerca la prima colonna le cui celle assomigliano a email
+        # (contengono "@"); se non c'è, si segnala l'errore originale.
+        ncols = max((len(r) for r in rows), default=0)
+        email_col = next(
+            (
+                c
+                for c in range(ncols)
+                if any("@" in str(row[c]) for row in rows if c < len(row) and row[c])
+            ),
+            None,
+        )
+        if email_col is None:
+            raise InputFileError(
+                "Non trovo una colonna intestata 'Email' né valori che assomigliano a "
+                f"indirizzi email nel file caricato. Intestazioni trovate: {header}"
+            )
+        data_rows = rows
 
     emails: list[str] = []
-    for row in rows[1:]:
+    for row in data_rows:
         if email_col >= len(row):
             continue
         value = row[email_col]
