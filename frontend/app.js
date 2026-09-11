@@ -461,6 +461,9 @@ function runCompanyStream(jobId, total) {
       const data = JSON.parse(ev.data);
       currentCompanyResults = data;
       renderCompanyTables(data);
+      if (data.classify_error) {
+        companyLogLine(`Errore classificazione tematica: ${data.classify_error}`, "error");
+      }
       companyLogLine("Elaborazione completata.", "ok");
       es.close();
       resolve();
