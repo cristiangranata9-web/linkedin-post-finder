@@ -254,17 +254,16 @@ async def v2_company_enrich(client: httpx.AsyncClient, company_name: str) -> Res
     "Assopellettieri" e "FederlegnoArredo" risolti correttamente in un unico
     match; "Confindustria Nautica" ha prodotto un match ambiguo con l'entità
     generica "Confindustria", gestito qui allo stesso modo di un match
-    ambiguo email->persona). Lo schema esatto del corpo della richiesta (nome
-    del parametro per il nome azienda) NON è confermato riga per riga sulla
-    documentazione pubblica di Crustdata (che documenta pubblicamente solo
-    l'esempio con "domains"): qui si usa "company_names", seguendo la stessa
-    convenzione plurale di "business_emails" in v2_person_enrich. Come per
+    ambiguo email->persona). Il nome del parametro per il nome azienda è
+    "names" (confermato dal messaggio di errore restituito dall'API stessa:
+    "Exactly one identifier must be provided: names, domains,
+    professional_network_profile_urls, or crustdata_company_ids"). Come per
     v1_person_enrich, un eventuale 404 viene segnalato esplicitamente come
     "endpoint/schema da verificare", mai confuso con "azienda non trovata".
     """
     url = f"{CRUSTDATA_BASE_URL}/company/enrich"
     body = {
-        "company_names": [company_name],
+        "names": [company_name],
         "fields": ["basic_info"],
     }
     try:
