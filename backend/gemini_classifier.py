@@ -16,15 +16,23 @@ come "nessuna tematica assegnata", mai forzato su una tematica a caso.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Optional
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai.types import GenerateContentConfig
 
 CLASSIFIER_MODEL = "gemini-3.6-flash"
 BATCH_SIZE = 20
+# Codici HTTP transitori (rate limit / sovraccarico temporaneo del modello,
+# non un errore di configurazione o di formato della richiesta) per cui vale
+# la pena ritentare invece di segnalare subito "Errore classificazione".
+_RETRYABLE_CODES = {429, 503}
+_MAX_ATTEMPTS = 5
+_BASE_DELAY = 10.0
 
 
 class ClassifierConfigError(RuntimeError):
@@ -83,16 +91,37 @@ async def classify_posts(posts: list[dict], topics: list[str]) -> list[Optional[
     for batch_start in range(0, len(posts), BATCH_SIZE):
         batch = posts[batch_start : batch_start + BATCH_SIZE]
         prompt = _build_prompt(batch, topics)
-        try:
-            resp = await client.aio.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=prompt,
-                config=GenerateContentConfig(response_mime_type="application/json"),
-            )
-        except Exception as exc:  # noqa: BLE001
+
+        resp = None
+        last_exc: Optional[Exception] = None
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                resp = await client.aio.models.generate_content(
+                    model=CLASSIFIER_MODEL,
+                    contents=prompt,
+                    config=GenerateContentConfig(response_mime_type="application/json"),
+                )
+                break
+            except genai_errors.APIError as exc:
+                last_exc = exc
+                if exc.code in _RETRYABLE_CODES and attempt < _MAX_ATTEMPTS - 1:
+                    await asyncio.sleep(_BASE_DELAY * (attempt + 1))
+                    continue
+                raise ClassifierAPIError(
+                    f"Errore chiamando l'API Gemini per la classificazione: {exc}"
+                ) from exc
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                raise ClassifierAPIError(
+                    f"Errore chiamando l'API Gemini per la classificazione: {exc}"
+                ) from exc
+        if resp is None:
+            # Non dovrebbe accadere (il loop sopra o restituisce resp o
+            # lancia), ma per sicurezza non si prosegue con un batch senza
+            # risposta.
             raise ClassifierAPIError(
-                f"Errore chiamando l'API Gemini per la classificazione: {exc}"
-            ) from exc
+                f"Errore chiamando l'API Gemini per la classificazione: {last_exc}"
+            )
 
         raw_text = (resp.text or "").strip()
 
