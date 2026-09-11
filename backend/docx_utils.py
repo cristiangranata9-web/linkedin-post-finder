@@ -20,10 +20,41 @@ documentato per l'endpoint v1 non verificato in crustdata_client.py.
 from __future__ import annotations
 
 import io
+import re
 
 from docx import Document
 
 from excel_utils import InputFileError
+
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+def read_emails_from_docx(file_bytes: bytes) -> list[str]:
+    """Legge un elenco di indirizzi email da un file .docx, estraendo ogni
+    stringa che corrisponde al pattern di un indirizzo email dai paragrafi e
+    dalle tabelle del documento. Nessun indirizzo viene inventato: solo
+    quelli effettivamente presenti nel testo del file caricato."""
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+    except Exception as exc:  # noqa: BLE001
+        raise InputFileError(f"Impossibile leggere il file .docx: {exc}") from exc
+
+    emails: list[str] = []
+    texts = [p.text for p in doc.paragraphs]
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                texts.append(cell.text)
+
+    for text in texts:
+        emails.extend(_EMAIL_RE.findall(text))
+
+    if not emails:
+        raise InputFileError(
+            "Non ho trovato nessun indirizzo email nel file .docx caricato."
+        )
+
+    return emails
 
 # Parole chiave (case-insensitive) che, se presenti nel testo di un paragrafo,
 # lo identificano come intestazione di una sezione da ESCLUDERE (soci usciti).

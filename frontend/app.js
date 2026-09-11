@@ -138,7 +138,7 @@ startBtn.addEventListener("click", async () => {
   clearError();
   const file = fileInput.files[0];
   if (!file) {
-    showError("Seleziona un file .xlsx prima di procedere.");
+    showError("Seleziona un file .xlsx, .xls o .docx prima di procedere.");
     return;
   }
   const period = periodSelect.value;
@@ -380,7 +380,7 @@ companyStartBtn.addEventListener("click", async () => {
   clearCompanyError();
   const file = companyFileInput.files[0];
   if (!file) {
-    showCompanyError("Seleziona un file .docx con l'elenco soci/partner.");
+    showCompanyError("Seleziona un file .docx, .xlsx o .xls con l'elenco soci/partner.");
     return;
   }
   const mode = companyModeSelect.value;

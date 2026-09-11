@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 from typing import Any
 
+import xlrd
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
@@ -18,15 +19,28 @@ class InputFileError(ValueError):
     pass
 
 
-def read_emails_from_xlsx(file_bytes: bytes) -> list[str]:
-    """Legge la colonna 'Email' dal primo foglio del file caricato."""
+def _load_first_sheet_rows(file_bytes: bytes, filename: str) -> list[tuple]:
+    """Legge le righe del primo foglio di un file Excel, in formato .xlsx
+    (via openpyxl) o del vecchio formato binario .xls (via xlrd)."""
+    if filename.lower().endswith(".xls"):
+        try:
+            book = xlrd.open_workbook(file_contents=file_bytes)
+        except Exception as exc:  # noqa: BLE001
+            raise InputFileError(f"Impossibile leggere il file .xls: {exc}") from exc
+        sheet = book.sheet_by_index(0)
+        return [tuple(sheet.row_values(r)) for r in range(sheet.nrows)]
+
     try:
         wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     except Exception as exc:  # noqa: BLE001
         raise InputFileError(f"Impossibile leggere il file .xlsx: {exc}") from exc
-
     ws = wb.worksheets[0]
-    rows = list(ws.iter_rows(values_only=True))
+    return list(ws.iter_rows(values_only=True))
+
+
+def read_emails_from_xlsx(file_bytes: bytes, filename: str = "file.xlsx") -> list[str]:
+    """Legge la colonna 'Email' dal primo foglio del file caricato (.xlsx o .xls)."""
+    rows = _load_first_sheet_rows(file_bytes, filename)
     if not rows:
         raise InputFileError("Il file è vuoto.")
 
@@ -44,7 +58,7 @@ def read_emails_from_xlsx(file_bytes: bytes) -> list[str]:
         if email_col >= len(row):
             continue
         value = row[email_col]
-        if value is None:
+        if value is None or value == "":
             continue
         value = str(value).strip()
         if value:
@@ -54,6 +68,41 @@ def read_emails_from_xlsx(file_bytes: bytes) -> list[str]:
         raise InputFileError("La colonna 'Email' non contiene indirizzi validi.")
 
     return emails
+
+
+COMPANY_NAME_HEADERS = {"azienda", "nome azienda", "ragione sociale", "ente", "nome ente", "socio", "nome"}
+
+
+def read_company_names_from_xlsx(file_bytes: bytes, filename: str = "file.xlsx") -> list[str]:
+    """Legge un elenco di nomi azienda/ente da un file .xlsx o .xls, cercando
+    una colonna con intestazione tra quelle note (vedi COMPANY_NAME_HEADERS).
+    Se non trova nessuna di queste intestazioni, usa la prima colonna del
+    primo foglio (utile per elenchi semplici a una sola colonna, senza header)."""
+    rows = _load_first_sheet_rows(file_bytes, filename)
+    if not rows:
+        raise InputFileError("Il file è vuoto.")
+
+    header = [str(c).strip() if c is not None else "" for c in rows[0]]
+    name_col = next((i for i, h in enumerate(header) if h.lower() in COMPANY_NAME_HEADERS), None)
+
+    data_rows = rows[1:] if name_col is not None else rows
+    col = name_col if name_col is not None else 0
+
+    names: list[str] = []
+    for row in data_rows:
+        if col >= len(row):
+            continue
+        value = row[col]
+        if value is None or value == "":
+            continue
+        value = str(value).strip()
+        if value:
+            names.append(value)
+
+    if not names:
+        raise InputFileError("Non ho trovato nessun nome di azienda/ente nel file .xlsx caricato.")
+
+    return names
 
 
 def read_topics_from_editorial_plan_xlsx(file_bytes: bytes) -> list[str]:

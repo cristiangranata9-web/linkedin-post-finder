@@ -36,12 +36,13 @@ from crustdata_client import (
     resolve_company_to_profile,
     resolve_email_to_profile,
 )
-from docx_utils import read_company_names_from_docx
+from docx_utils import read_company_names_from_docx, read_emails_from_docx
 from excel_utils import (
     GIORNI_IT,
     InputFileError,
     build_detailed_xlsx,
     build_weekly_xlsx,
+    read_company_names_from_xlsx,
     read_emails_from_xlsx,
     read_topics_from_editorial_plan_xlsx,
 )
@@ -132,12 +133,15 @@ async def create_job(
 ):
     _cleanup_jobs()
 
-    if not file.filename.lower().endswith(".xlsx"):
-        raise HTTPException(400, "Il file deve essere in formato .xlsx.")
-
+    filename = file.filename.lower()
     content = await file.read()
     try:
-        emails = read_emails_from_xlsx(content)
+        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+            emails = read_emails_from_xlsx(content, filename)
+        elif filename.endswith(".docx"):
+            emails = read_emails_from_docx(content)
+        else:
+            raise HTTPException(400, "Il file deve essere in formato .xlsx, .xls o .docx.")
     except InputFileError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -177,14 +181,18 @@ async def create_company_job(
     """
     _cleanup_jobs()
 
-    if not file.filename.lower().endswith(".docx"):
-        raise HTTPException(400, "Il file dell'elenco soci/partner deve essere in formato .docx.")
     if mode not in ("general", "topic"):
         raise HTTPException(400, "mode deve essere 'general' oppure 'topic'.")
 
+    filename = file.filename.lower()
     content = await file.read()
     try:
-        companies = read_company_names_from_docx(content)
+        if filename.endswith(".docx"):
+            companies = read_company_names_from_docx(content)
+        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+            companies = read_company_names_from_xlsx(content, filename)
+        else:
+            raise HTTPException(400, "Il file dell'elenco soci/partner deve essere in formato .docx, .xlsx o .xls.")
     except InputFileError as exc:
         raise HTTPException(400, str(exc)) from exc
 
