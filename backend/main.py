@@ -38,14 +38,13 @@ from crustdata_client import (
 )
 import apify_client
 from apify_client import ApifyAPIError
-from docx_utils import read_company_names_from_docx, read_emails_from_docx
+from docx_utils import read_company_names_from_docx
 from excel_utils import (
     GIORNI_IT,
     InputFileError,
     build_detailed_xlsx,
     build_weekly_xlsx,
     read_company_names_from_xlsx,
-    read_emails_from_xlsx,
     read_topics_from_editorial_plan_xlsx,
 )
 
@@ -170,45 +169,6 @@ async def login(request: Request):
     return {"status": "ok"}
 
 
-@app.post("/api/jobs", dependencies=[Depends(_verify_password)])
-async def create_job(
-    file: UploadFile = File(...),
-    period: str = Form(...),
-    custom_start: Optional[str] = Form(None),
-    custom_end: Optional[str] = Form(None),
-):
-    _cleanup_jobs()
-
-    filename = file.filename.lower()
-    content = await file.read()
-    try:
-        if filename.endswith(".xlsx") or filename.endswith(".xls"):
-            emails = read_emails_from_xlsx(content, filename)
-        elif filename.endswith(".docx"):
-            emails = read_emails_from_docx(content)
-        else:
-            raise HTTPException(400, "Il file deve essere in formato .xlsx, .xls o .docx.")
-    except InputFileError as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-    emails = _dedupe_preserve_order(emails)
-
-    date_from, date_to = _compute_date_range(period, custom_start, custom_end)
-
-    job_id = str(uuid.uuid4())
-    JOBS[job_id] = {
-        "created_at": datetime.utcnow(),
-        "kind": "email",
-        "emails": emails,
-        "date_from": date_from,
-        "date_to": date_to,
-        "started": False,
-        "status": "pending",
-        "results": None,
-    }
-    return {"job_id": job_id, "total_emails": len(emails), "date_from": str(date_from), "date_to": str(date_to)}
-
-
 @app.post("/api/company-jobs", dependencies=[Depends(_verify_password)])
 async def create_company_job(
     file: UploadFile = File(...),
@@ -220,12 +180,16 @@ async def create_company_job(
 ):
     """
     Crea un job di ricerca a partire dall'elenco soci/partner in formato
-    .docx. mode="general" cerca tutti i post nel periodo, senza filtri.
-    mode="topic" richiede in più il piano editoriale (.xlsx) da cui vengono
-    lette le tematiche disponibili; i post trovati vengono poi classificati
-    per tematica (vedi claude_classifier.py), senza mai scartare risultati
-    reali: ogni post recuperato compare comunque nell'output, con la
-    tematica assegnata (o "Nessuna tematica" se nessuna si applica).
+    .docx/.xlsx/.xls. Ogni riga può essere un nome azienda/ente oppure un
+    indirizzo email: il tipo viene rilevato per singola voce in
+    _process_company_job (contiene "@" -> email -> risoluzione profilo
+    persona, altrimenti -> risoluzione pagina azienda). mode="general" cerca
+    tutti i post nel periodo, senza filtri. mode="topic" richiede in più il
+    piano editoriale (.xlsx) da cui vengono lette le tematiche disponibili; i
+    post trovati vengono poi classificati per tematica (vedi
+    gemini_classifier.py), senza mai scartare risultati reali: ogni post
+    recuperato compare comunque nell'output, con la tematica assegnata (o
+    "Nessuna tematica" se nessuna si applica).
     """
     _cleanup_jobs()
 
@@ -284,123 +248,15 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
-async def _process_job(job_id: str):
-    job = JOBS[job_id]
-    emails = job["emails"]
-    date_from, date_to = job["date_from"], job["date_to"]
-    total = len(emails)
-
-    weekly_rows = []
-    detailed_rows = []
-    summary = {"processed": 0, "profiles_found": 0, "profiles_not_found": 0, "unverified_matches": 0, "errors": 0, "total_posts": 0}
-
-    config_error: Optional[str] = None
-    # Cache dei post già recuperati in questo job, per URL profilo: se due
-    # email diverse risolvono alla stessa persona, evita di richiamare
-    # get_linkedin_posts (e quindi di consumare crediti) due volte.
-    posts_cache: dict[str, list[dict]] = {}
-
-    async with httpx.AsyncClient() as client:
-        for idx, email in enumerate(emails, start=1):
-            yield _sse("progress", {"index": idx, "total": total, "email": email, "message": "Ricerca profilo LinkedIn..."})
-
-            giorni: dict[str, list[str]] = {g: [] for g in GIORNI_IT}
-            row_common = {"email": email}
-
-            try:
-                resolution = await resolve_email_to_profile(client, email)
-            except CrustdataConfigError as exc:
-                config_error = str(exc)
-                yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Errore di configurazione: {exc}"})
-                summary["errors"] += 1
-                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": "Errore configurazione backend", "giorni": giorni})
-                summary["processed"] += 1
-                break
-            except CrustdataAPIError as exc:
-                summary["errors"] += 1
-                yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Errore Crustdata: {exc}"})
-                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": f"Errore: {exc}", "giorni": giorni})
-                summary["processed"] += 1
-                continue
-
-            if resolution.status == "error":
-                summary["errors"] += 1
-                yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Errore: {resolution.error_message}"})
-                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": f"Errore: {resolution.error_message}", "giorni": giorni})
-                summary["processed"] += 1
-                continue
-
-            if resolution.status == "not_found":
-                summary["profiles_not_found"] += 1
-                yield _sse("progress", {"index": idx, "total": total, "email": email, "message": "Profilo non trovato."})
-                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": "Profilo non trovato", "giorni": giorni})
-                detailed_rows.append({**row_common, "profile_name": "", "profile_url": "", "post_date": "", "day_of_week": "", "post_link": "Profilo non trovato"})
-                summary["processed"] += 1
-                continue
-
-            if resolution.status == "ambiguous":
-                summary["unverified_matches"] += 1
-                candidates = ", ".join(m.linkedin_url for m in resolution.matches[:5])
-                yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Match non verificato ({len(resolution.matches)} profili candidati)."})
-                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": f"Match non verificato: {candidates}", "giorni": giorni})
-                detailed_rows.append({**row_common, "profile_name": "", "profile_url": "", "post_date": "", "day_of_week": "", "post_link": f"Match non verificato ({len(resolution.matches)} candidati)"})
-                summary["processed"] += 1
-                continue
-
-            # resolved
-            match = resolution.matches[0]
-            summary["profiles_found"] += 1
-            yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Profilo trovato: {match.name or match.linkedin_url}. Ricerca post..."})
-
-            if match.linkedin_url in posts_cache:
-                posts = posts_cache[match.linkedin_url]
-            else:
-                try:
-                    posts = await _with_rate_limit_retry(
-                        lambda: _fetch_posts(client, date_from, date_to, person_linkedin_url=match.linkedin_url)
-                    )
-                except (CrustdataAPIError, ApifyAPIError) as exc:
-                    summary["errors"] += 1
-                    yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Errore nel recupero dei post: {exc}"})
-                    weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": f"Errore post: {exc}", "giorni": giorni})
-                    summary["processed"] += 1
-                    continue
-                posts_cache[match.linkedin_url] = posts
-
-            if not posts:
-                yield _sse("progress", {"index": idx, "total": total, "email": email, "message": "Nessun post trovato nel periodo selezionato."})
-                weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": "Nessun post trovato", "giorni": giorni})
-                detailed_rows.append({**row_common, "profile_name": match.name or "", "profile_url": match.linkedin_url, "post_date": "", "day_of_week": "", "post_link": "Nessun post trovato"})
-            else:
-                for p in posts:
-                    giorno_idx = p["date"].weekday()  # 0=Lunedì
-                    giorno_nome = GIORNI_IT[giorno_idx]
-                    if p["url"]:
-                        giorni[giorno_nome].append(p["url"])
-                    detailed_rows.append(
-                        {
-                            **row_common,
-                            "profile_name": match.name or "",
-                            "profile_url": match.linkedin_url,
-                            "post_date": p["date"].strftime("%Y-%m-%d"),
-                            "day_of_week": giorno_nome,
-                            "post_link": p["url"] or "",
-                        }
-                    )
-                summary["total_posts"] += len(posts)
-                weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": "", "giorni": giorni})
-                yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Ricerca completata: {len(posts)} post trovati."})
-
-            summary["processed"] += 1
-
-    result_payload = {"weekly_rows": weekly_rows, "detailed_rows": detailed_rows, "summary": summary, "config_error": config_error}
-    job["results"] = result_payload
-    job["status"] = "done"
-    yield _sse("summary", summary)
-    yield _sse("result", result_payload)
-
-
 async def _process_company_job(job_id: str):
+    """
+    Elabora ogni voce dell'elenco soci/partner caricato. Ogni voce viene
+    trattata come indirizzo email (se contiene "@") o come nome
+    azienda/ente: nel primo caso si risolve un profilo LinkedIn personale
+    (resolve_email_to_profile + post della persona), nel secondo una pagina
+    LinkedIn aziendale (resolve_company_to_profile + post dell'azienda). Le
+    due tipologie possono convivere nello stesso file/job.
+    """
     job = JOBS[job_id]
     companies = job["companies"]
     mode = job["mode"]
@@ -413,54 +269,66 @@ async def _process_company_job(job_id: str):
     summary = {"processed": 0, "profiles_found": 0, "profiles_not_found": 0, "unverified_matches": 0, "errors": 0, "total_posts": 0}
 
     config_error: Optional[str] = None
-    # Cache dei post già recuperati in questo job, per URL pagina azienda: se
-    # due nomi diversi (es. varianti di scrittura) risolvono alla stessa
-    # pagina LinkedIn, evita di richiamare get_linkedin_posts due volte.
+    # Cache dei post già recuperati in questo job, per URL profilo/pagina: se
+    # due voci diverse (es. varianti di scrittura, o la stessa persona/
+    # azienda ripetuta) risolvono allo stesso URL LinkedIn, evita di
+    # richiamare _fetch_posts (e quindi di consumare crediti) due volte.
     posts_cache: dict[str, list[dict]] = {}
 
     async with httpx.AsyncClient() as client:
-        for idx, company in enumerate(companies, start=1):
+        for idx, entry in enumerate(companies, start=1):
+            is_email = "@" in entry
             if idx > 1:
-                # Pausa tra un'azienda e l'altra per non saturare il rate
-                # limit di Crustdata (ogni azienda può generare più di una
-                # chiamata a /company/identify).
+                # Pausa tra una voce e l'altra per non saturare il rate
+                # limit di Crustdata (ogni voce può generare più di una
+                # chiamata a /company/identify o /person/enrich).
                 await asyncio.sleep(3.0)
-            yield _sse("progress", {"index": idx, "total": total, "email": company, "message": "Ricerca pagina LinkedIn azienda..."})
+            search_msg = "Ricerca profilo LinkedIn..." if is_email else "Ricerca pagina LinkedIn azienda..."
+            yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": search_msg})
 
             giorni: dict[str, list[str]] = {g: [] for g in GIORNI_IT}
-            row_common = {"email": company}
+            row_common = {"email": entry}
 
             try:
-                resolution = await _with_rate_limit_retry(
-                    lambda: resolve_company_to_profile(client, company)
-                )
+                if is_email:
+                    resolution = await _with_rate_limit_retry(lambda: resolve_email_to_profile(client, entry))
+                else:
+                    resolution = await _with_rate_limit_retry(lambda: resolve_company_to_profile(client, entry))
             except CrustdataConfigError as exc:
                 config_error = str(exc)
-                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore di configurazione: {exc}"})
+                yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": f"Errore di configurazione: {exc}"})
                 summary["errors"] += 1
                 weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": "Errore configurazione backend", "giorni": giorni})
                 summary["processed"] += 1
                 break
+            except (CrustdataAPIError, ApifyAPIError) as exc:
+                summary["errors"] += 1
+                yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": f"Errore: {exc}"})
+                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": f"Errore: {exc}", "giorni": giorni})
+                summary["processed"] += 1
+                continue
 
             if resolution.status == "error":
                 summary["errors"] += 1
-                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore: {resolution.error_message}"})
+                yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": f"Errore: {resolution.error_message}"})
                 weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": f"Errore: {resolution.error_message}", "giorni": giorni})
                 summary["processed"] += 1
                 continue
 
             if resolution.status == "not_found":
+                not_found_label = "Profilo non trovato" if is_email else "Pagina non trovata"
                 summary["profiles_not_found"] += 1
-                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": "Pagina LinkedIn non trovata."})
-                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": "Pagina non trovata", "giorni": giorni})
-                detailed_rows.append({**row_common, "profile_name": "", "profile_url": "", "post_date": "", "day_of_week": "", "post_link": "Pagina non trovata", "text": None})
+                yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": f"{not_found_label}."})
+                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": not_found_label, "giorni": giorni})
+                detailed_rows.append({**row_common, "profile_name": "", "profile_url": "", "post_date": "", "day_of_week": "", "post_link": not_found_label, "text": None})
                 summary["processed"] += 1
                 continue
 
             if resolution.status == "ambiguous":
+                candidates_label = "profili candidati" if is_email else "pagine candidate"
                 summary["unverified_matches"] += 1
                 candidates = ", ".join(m.linkedin_url for m in resolution.matches[:5])
-                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Match non verificato ({len(resolution.matches)} pagine candidate)."})
+                yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": f"Match non verificato ({len(resolution.matches)} {candidates_label})."})
                 weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": f"Match non verificato: {candidates}", "giorni": giorni})
                 detailed_rows.append({**row_common, "profile_name": "", "profile_url": "", "post_date": "", "day_of_week": "", "post_link": f"Match non verificato ({len(resolution.matches)} candidati)", "text": None})
                 summary["processed"] += 1
@@ -468,26 +336,28 @@ async def _process_company_job(job_id: str):
 
             # resolved
             match = resolution.matches[0]
+            found_msg = "Profilo trovato" if is_email else "Pagina trovata"
             summary["profiles_found"] += 1
-            yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Pagina trovata: {match.name or match.linkedin_url}. Ricerca post..."})
+            yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": f"{found_msg}: {match.name or match.linkedin_url}. Ricerca post..."})
 
             if match.linkedin_url in posts_cache:
                 posts = posts_cache[match.linkedin_url]
             else:
                 try:
+                    fetch_kwargs = {"person_linkedin_url": match.linkedin_url} if is_email else {"company_linkedin_url": match.linkedin_url}
                     posts = await _with_rate_limit_retry(
-                        lambda: _fetch_posts(client, date_from, date_to, company_linkedin_url=match.linkedin_url)
+                        lambda: _fetch_posts(client, date_from, date_to, **fetch_kwargs)
                     )
                 except (CrustdataAPIError, ApifyAPIError) as exc:
                     summary["errors"] += 1
-                    yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore nel recupero dei post: {exc}"})
+                    yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": f"Errore nel recupero dei post: {exc}"})
                     weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": f"Errore post: {exc}", "giorni": giorni})
                     summary["processed"] += 1
                     continue
                 posts_cache[match.linkedin_url] = posts
 
             if not posts:
-                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": "Nessun post trovato nel periodo selezionato."})
+                yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": "Nessun post trovato nel periodo selezionato."})
                 weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": "Nessun post trovato", "giorni": giorni})
                 detailed_rows.append({**row_common, "profile_name": match.name or "", "profile_url": match.linkedin_url, "post_date": "", "day_of_week": "", "post_link": "Nessun post trovato", "text": None})
             else:
@@ -509,7 +379,7 @@ async def _process_company_job(job_id: str):
                     )
                 summary["total_posts"] += len(posts)
                 weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": "", "giorni": giorni})
-                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Ricerca completata: {len(posts)} post trovati."})
+                yield _sse("progress", {"index": idx, "total": total, "email": entry, "message": f"Ricerca completata: {len(posts)} post trovati."})
 
             summary["processed"] += 1
 
@@ -559,12 +429,8 @@ async def stream_job(job_id: str):
     job["started"] = True
 
     async def event_gen():
-        if job.get("kind") == "company":
-            async for chunk in _process_company_job(job_id):
-                yield chunk
-        else:
-            async for chunk in _process_job(job_id):
-                yield chunk
+        async for chunk in _process_company_job(job_id):
+            yield chunk
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
@@ -576,9 +442,8 @@ async def export_job(job_id: str, type: str = "weekly"):
         raise HTTPException(404, "Risultati non disponibili per questo job.")
 
     results = job["results"]
-    is_company = job.get("kind") == "company"
-    entity_label = "Azienda/Socio" if is_company else "Email"
-    include_topic = is_company and job.get("mode") == "topic"
+    entity_label = "Azienda/Socio o Email"
+    include_topic = job.get("mode") == "topic"
 
     if type == "weekly":
         content = build_weekly_xlsx(results["weekly_rows"], entity_label=entity_label)

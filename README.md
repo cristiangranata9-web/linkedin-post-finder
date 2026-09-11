@@ -1,9 +1,11 @@
 # LinkedIn Post Finder
 
-Web app per: caricare un elenco di email (.xlsx), risolvere ciascuna email al
-relativo profilo LinkedIn tramite [Crustdata](https://crustdata.com), recuperare
-i post pubblicati da quel profilo in un periodo scelto, e scaricare i risultati
-in due file Excel (vista settimanale e vista dettagliata).
+Web app per: caricare un elenco di soci/partner (.docx, .xlsx o .xls — ogni
+voce può essere un nome azienda/ente oppure un indirizzo email), risolvere
+ciascuna voce alla relativa pagina/profilo LinkedIn tramite
+[Crustdata](https://crustdata.com), recuperare i post pubblicati nel periodo
+scelto, e scaricare i risultati in due file Excel (vista settimanale e vista
+dettagliata).
 
 Architettura volutamente minimale, come richiesto:
 - **Nessun database.** I risultati vivono solo in memoria, per la durata del
@@ -55,14 +57,17 @@ Quando è attiva:
 
 ## Ricerca Soci/Partner (Cluster MINIT) — generale o per tematica
 
-Oltre alla ricerca per email (colonna "Email" in un .xlsx), l'app offre una
-seconda modalità pensata per l'elenco soci/partner del Cluster, fornito come
-file **.docx** (elenco di nomi di aziende/enti, senza email né URL). Le due
-modalità condividono lo stesso file .docx in input:
+L'app ha una sola sezione, pensata per l'elenco soci/partner del Cluster,
+caricabile come file **.docx**, **.xlsx** o **.xls**. Ogni voce del file può
+essere un **nome azienda/ente** oppure un **indirizzo email**: il backend
+rileva il tipo voce per voce (contiene "@" → email) e usa la risoluzione
+Crustdata corrispondente — pagina LinkedIn aziendale (`/company/identify`)
+per i nomi azienda, profilo LinkedIn personale (`/person/enrich`) per le
+email — senza bisogno di due file o due sezioni separate.
 
-- **Ricerca generale**: per ciascun nome trova la pagina LinkedIn aziendale
-  corrispondente e recupera tutti i post pubblicati nel periodo scelto —
-  stesso comportamento della ricerca per email, senza alcun filtro.
+- **Ricerca generale**: per ciascuna voce trova la pagina/il profilo
+  LinkedIn corrispondente e recupera tutti i post pubblicati nel periodo
+  scelto, senza alcun filtro.
 - **Ricerca per tematica**: fa lo stesso, e in più richiede il **piano
   editoriale** (.xlsx, colonna "Area Tematica"). Ogni post recuperato viene
   classificato tramite l'API gratuita di **Google Gemini** sulle tematiche
@@ -73,16 +78,15 @@ modalità condividono lo stesso file .docx in input:
   dedicata; un filtro a tendina nella vista dettagliata permette di
   visualizzare solo una tematica alla volta, senza scartare gli altri dati.
 
-Come per la ricerca email, un nome che matcha più pagine LinkedIn candidate
-(es. un acronimo che corrisponde sia all'ente specifico sia a un'entità più
-generica) viene segnalato come **"Match non verificato"**, mai scelto a
-caso.
+Una voce che matcha più pagine/profili candidati (es. un acronimo che
+corrisponde sia all'ente specifico sia a un'entità più generica) viene
+segnalata come **"Match non verificato"**, mai scelta a caso.
 
 Questa modalità richiede in più la variabile d'ambiente `GEMINI_API_KEY`
 (vedi `.env.example`), usata **solo** per la classificazione dei post nella
-ricerca per tematica — non serve per la ricerca generale né per quella per
-email. È una chiave **gratuita** (nessuna carta di credito richiesta),
-ottenibile su https://aistudio.google.com/apikey.
+ricerca per tematica — non serve per la ricerca generale. È una chiave
+**gratuita** (nessuna carta di credito richiesta), ottenibile su
+https://aistudio.google.com/apikey.
 
 ## Struttura del progetto
 
@@ -194,24 +198,29 @@ di default, disattivabile dal pannello se preferisci deploy manuali).
 
 ## Cosa succede quando lanci una ricerca
 
-1. Carichi un file `.xlsx` con una colonna intitolata **Email**.
-2. Scegli il periodo (7 / 14 / 30 giorni, o intervallo personalizzato).
-3. Il backend, per ciascuna email, in ordine:
-   - prova a risolvere l'email al profilo LinkedIn tramite Crustdata
-     (endpoint v2 `/person/enrich`, e in fallback l'endpoint v1
-     `/screener/person/enrich` — vedi nota tecnica sotto);
-   - se trova **esattamente un** profilo con confidenza sufficiente, lo usa;
-   - se non trova nulla → riga marcata **"Profilo non trovato"**;
-   - se trova **più profili candidati** e non c'è un criterio per scegliere
-     in modo affidabile → riga marcata **"Match non verificato"** (non viene
-     mai scelto un profilo a caso);
-   - se il profilo è risolto, recupera i post pubblicati nel periodo scelto
-     (endpoint v1 `/screener/linkedin_posts`), **senza eliminare** eventuali
-     post multipli nello stesso giorno;
-   - se il profilo esiste ma non ha post nel periodo → **"Nessun post
-     trovato"**.
+1. Carichi un file `.docx`, `.xlsx` o `.xls` con l'elenco soci/partner (nomi
+   azienda e/o indirizzi email).
+2. Scegli il periodo (7 / 14 / 30 giorni, o intervallo personalizzato) ed
+   eventualmente il piano editoriale per la ricerca per tematica.
+3. Il backend, per ciascuna voce, in ordine:
+   - rileva se la voce è un indirizzo email (contiene "@") o un nome
+     azienda/ente, e usa la risoluzione Crustdata corrispondente
+     (`/person/enrich` per le email, `/company/identify` per i nomi
+     azienda — vedi nota tecnica sotto per il fallback v1 sulle email);
+   - se trova **esattamente un** profilo/pagina con confidenza sufficiente,
+     lo usa;
+   - se non trova nulla → riga marcata **"Profilo non trovato"** /
+     **"Pagina non trovata"**;
+   - se trova **più candidati** e non c'è un criterio per scegliere in modo
+     affidabile → riga marcata **"Match non verificato"** (non viene mai
+     scelto un candidato a caso);
+   - se risolto, recupera i post pubblicati nel periodo scelto (Crustdata o
+     Apify, vedi sopra), **senza eliminare** eventuali post multipli nello
+     stesso giorno;
+   - se il profilo/pagina esiste ma non ha post nel periodo → **"Nessun
+     post trovato"**.
 4. Vedi l'avanzamento in tempo reale ("Elaborazione 12/56", "Ricerca
-   profilo...", ecc.) e un riepilogo finale.
+   profilo/pagina...", ecc.) e un riepilogo finale.
 5. Scarichi i due file Excel dai pulsanti dedicati.
 
 ## Nota tecnica onesta su un dettaglio non verificabile al 100%

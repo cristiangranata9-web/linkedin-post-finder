@@ -1,6 +1,7 @@
 """
-Lettura del file .xlsx di input (colonna "Email") e generazione dei due file
-.xlsx di output (vista settimanale e vista dettagliata), con link cliccabili.
+Lettura del file .xlsx di input (elenco soci/partner, che può contenere nomi
+azienda e/o indirizzi email) e generazione dei due file .xlsx di output
+(vista settimanale e vista dettagliata), con link cliccabili.
 """
 from __future__ import annotations
 
@@ -38,63 +39,19 @@ def _load_first_sheet_rows(file_bytes: bytes, filename: str) -> list[tuple]:
     return list(ws.iter_rows(values_only=True))
 
 
-def read_emails_from_xlsx(file_bytes: bytes, filename: str = "file.xlsx") -> list[str]:
-    """Legge la colonna 'Email' dal primo foglio del file caricato (.xlsx o .xls)."""
-    rows = _load_first_sheet_rows(file_bytes, filename)
-    if not rows:
-        raise InputFileError("Il file è vuoto.")
-
-    header = [str(c).strip() if c is not None else "" for c in rows[0]]
-    email_col = next((i for i, h in enumerate(header) if h.lower() == "email"), None)
-
-    if email_col is not None:
-        data_rows = rows[1:]
-    else:
-        # Nessuna intestazione "Email": il file potrebbe essere un semplice
-        # elenco di indirizzi senza riga di intestazione (prima riga già
-        # dato). Si cerca la prima colonna le cui celle assomigliano a email
-        # (contengono "@"); se non c'è, si segnala l'errore originale.
-        ncols = max((len(r) for r in rows), default=0)
-        email_col = next(
-            (
-                c
-                for c in range(ncols)
-                if any("@" in str(row[c]) for row in rows if c < len(row) and row[c])
-            ),
-            None,
-        )
-        if email_col is None:
-            raise InputFileError(
-                "Non trovo una colonna intestata 'Email' né valori che assomigliano a "
-                f"indirizzi email nel file caricato. Intestazioni trovate: {header}"
-            )
-        data_rows = rows
-
-    emails: list[str] = []
-    for row in data_rows:
-        if email_col >= len(row):
-            continue
-        value = row[email_col]
-        if value is None or value == "":
-            continue
-        value = str(value).strip()
-        if value:
-            emails.append(value)
-
-    if not emails:
-        raise InputFileError("La colonna 'Email' non contiene indirizzi validi.")
-
-    return emails
-
-
-COMPANY_NAME_HEADERS = {"azienda", "nome azienda", "ragione sociale", "ente", "nome ente", "socio", "nome"}
+COMPANY_NAME_HEADERS = {
+    "azienda", "nome azienda", "ragione sociale", "ente", "nome ente", "socio", "nome",
+    "email", "e-mail", "indirizzo email",
+}
 
 
 def read_company_names_from_xlsx(file_bytes: bytes, filename: str = "file.xlsx") -> list[str]:
-    """Legge un elenco di nomi azienda/ente da un file .xlsx o .xls, cercando
-    una colonna con intestazione tra quelle note (vedi COMPANY_NAME_HEADERS).
-    Se non trova nessuna di queste intestazioni, usa la prima colonna del
-    primo foglio (utile per elenchi semplici a una sola colonna, senza header)."""
+    """Legge un elenco di soci/partner (nomi azienda e/o indirizzi email) da
+    un file .xlsx o .xls, cercando una colonna con intestazione tra quelle
+    note (vedi COMPANY_NAME_HEADERS, che include sia le intestazioni tipiche
+    di un elenco aziende sia "Email"). Se non trova nessuna di queste
+    intestazioni, usa la prima colonna del primo foglio (utile per elenchi
+    semplici a una sola colonna, senza header)."""
     rows = _load_first_sheet_rows(file_bytes, filename)
     if not rows:
         raise InputFileError("Il file è vuoto.")
@@ -194,13 +151,10 @@ def _style_header(ws, ncols: int):
     ws.freeze_panes = "A2"
 
 
-def build_weekly_xlsx(weekly_rows: list[dict[str, Any]], entity_label: str = "Email") -> bytes:
+def build_weekly_xlsx(weekly_rows: list[dict[str, Any]], entity_label: str = "Azienda/Socio o Email") -> bytes:
     """
     Colonne: <entity_label> | Nome profilo LinkedIn | URL profilo LinkedIn |
              Lunedì..Domenica (link multipli impilati nella stessa cella).
-
-    entity_label permette di riusare la stessa funzione sia per la ricerca
-    per email ("Email") sia per la ricerca per azienda/socio ("Azienda").
     """
     wb = Workbook()
     ws = wb.active
@@ -249,7 +203,7 @@ def build_weekly_xlsx(weekly_rows: list[dict[str, Any]], entity_label: str = "Em
 
 def build_detailed_xlsx(
     detailed_rows: list[dict[str, Any]],
-    entity_label: str = "Email",
+    entity_label: str = "Azienda/Socio o Email",
     include_topic: bool = False,
 ) -> bytes:
     """

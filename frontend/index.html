@@ -25,83 +25,12 @@
   </header>
 
   <main class="hidden" id="app-main">
-    <div class="tabs">
-      <button class="main-tab-btn active" data-main-tab="email">Ricerca per email</button>
-      <button class="main-tab-btn" data-main-tab="company">Ricerca Soci/Partner (Cluster MINIT)</button>
-    </div>
-
-    <div id="main-tab-email">
-      <section class="card">
-        <h2>1. Carica file e imposta il periodo</h2>
-        <div class="form-row">
-          <div class="field">
-            <label for="file-input">File .xlsx, .xls (colonna "Email") o .docx</label>
-            <input type="file" id="file-input" accept=".xlsx,.xls,.docx" />
-          </div>
-          <div class="field">
-            <label for="period-select">Periodo</label>
-            <select id="period-select">
-              <option value="7">Ultimi 7 giorni</option>
-              <option value="14">Ultimi 14 giorni</option>
-              <option value="30" selected>Ultimi 30 giorni</option>
-              <option value="custom">Intervallo personalizzato</option>
-            </select>
-          </div>
-          <div class="field hidden" id="custom-range-fields">
-            <label>Dal</label>
-            <input type="date" id="custom-start" />
-          </div>
-          <div class="field hidden" id="custom-range-fields-2">
-            <label>Al</label>
-            <input type="date" id="custom-end" />
-          </div>
-          <div class="field">
-            <button id="start-btn">Avvia ricerca</button>
-          </div>
-        </div>
-        <p id="form-error" class="hidden" style="color:#b91c1c; font-size:13px; margin-top:10px;"></p>
-      </section>
-
-      <section class="card hidden" id="progress-card">
-        <h2>2. Avanzamento</h2>
-        <div class="progress-bar-outer"><div class="progress-bar-inner" id="progress-bar"></div></div>
-        <div id="progress-log"></div>
-      </section>
-
-      <section class="card hidden" id="summary-card">
-        <h2>3. Riepilogo</h2>
-        <div class="summary-grid" id="summary-grid"></div>
-      </section>
-
-      <section class="card hidden" id="results-card">
-        <h2>4. Risultati</h2>
-        <div class="tabs">
-          <button class="tab-btn active" data-tab="weekly">Vista settimanale</button>
-          <button class="tab-btn" data-tab="detailed">Vista dettagliata</button>
-        </div>
-
-        <div id="tab-weekly">
-          <div style="margin-bottom:10px;">
-            <button class="secondary" id="export-weekly-btn">Scarica Excel (settimanale)</button>
-          </div>
-          <div class="table-wrap"><table id="weekly-table"></table></div>
-        </div>
-
-        <div id="tab-detailed" class="hidden">
-          <div style="margin-bottom:10px;">
-            <button class="secondary" id="export-detailed-btn">Scarica Excel (dettagliato)</button>
-          </div>
-          <div class="table-wrap"><table id="detailed-table"></table></div>
-        </div>
-      </section>
-    </div>
-
-    <div class="hidden" id="main-tab-company">
+    <div id="main-tab-company">
       <section class="card">
         <h2>1. Carica elenco soci/partner e imposta il periodo</h2>
         <div class="form-row">
           <div class="field">
-            <label for="company-file-input">File .docx, .xlsx o .xls (elenco soci)</label>
+            <label for="company-file-input">File .docx, .xlsx o .xls (elenco soci/partner: nomi azienda e/o email)</label>
             <input type="file" id="company-file-input" accept=".docx,.xlsx,.xls" />
           </div>
           <div class="field">
