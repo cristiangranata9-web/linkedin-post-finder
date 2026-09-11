@@ -437,7 +437,7 @@ async def get_linkedin_posts(
     date_to,
     person_linkedin_url: Optional[str] = None,
     company_linkedin_url: Optional[str] = None,
-    max_pages: int = 10,
+    max_pages: int = 5,
 ) -> list[dict]:
     """
     GET /screener/linkedin_posts (v1) - recupera i post di un profilo persona
@@ -446,6 +446,11 @@ async def get_linkedin_posts(
     consumare crediti oltre il necessario: la fatturazione è per post
     restituito). Nessuna deduplicazione: tutti i post nel range vengono tenuti,
     anche più nello stesso giorno.
+
+    max_pages=5 è un tetto di sicurezza sui crediti consumati per singolo
+    profilo/azienda: nel normale utilizzo (periodi di 7-30 giorni) il ciclo
+    si ferma molto prima grazie al filtro data, questo limite serve solo a
+    evitare consumi anomali in casi limite.
 
     NOTA: l'API accetta "page" o "limit", mai entrambi insieme (risposta 400
     "Only one of 'page' or 'limit' can be provided, not both" se passati

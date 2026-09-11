@@ -47,6 +47,20 @@ from excel_utils import (
     read_topics_from_editorial_plan_xlsx,
 )
 
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    """Rimuove i duplicati (case/spazi-insensitive) mantenendo il primo
+    valore incontrato e l'ordine originale. Ogni voce duplicata evitata è
+    una chiamata Crustdata in meno (identify + eventuale recupero post)."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        key = item.strip().casefold()
+        if key and key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result
+
+
 async def _with_rate_limit_retry(coro_fn, *, max_attempts: int = 6, base_delay: float = 15.0):
     """Esegue `coro_fn()` ritentando con backoff se Crustdata risponde 429
     (rate limit). Non nasconde altri errori: solo il 429 viene ritentato,
@@ -145,6 +159,8 @@ async def create_job(
     except InputFileError as exc:
         raise HTTPException(400, str(exc)) from exc
 
+    emails = _dedupe_preserve_order(emails)
+
     date_from, date_to = _compute_date_range(period, custom_start, custom_end)
 
     job_id = str(uuid.uuid4())
@@ -196,6 +212,8 @@ async def create_company_job(
     except InputFileError as exc:
         raise HTTPException(400, str(exc)) from exc
 
+    companies = _dedupe_preserve_order(companies)
+
     topics: list[str] = []
     if mode == "topic":
         if not plan_file:
@@ -245,6 +263,10 @@ async def _process_job(job_id: str):
     summary = {"processed": 0, "profiles_found": 0, "profiles_not_found": 0, "unverified_matches": 0, "errors": 0, "total_posts": 0}
 
     config_error: Optional[str] = None
+    # Cache dei post già recuperati in questo job, per URL profilo: se due
+    # email diverse risolvono alla stessa persona, evita di richiamare
+    # get_linkedin_posts (e quindi di consumare crediti) due volte.
+    posts_cache: dict[str, list[dict]] = {}
 
     async with httpx.AsyncClient() as client:
         for idx, email in enumerate(emails, start=1):
@@ -298,14 +320,18 @@ async def _process_job(job_id: str):
             summary["profiles_found"] += 1
             yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Profilo trovato: {match.name or match.linkedin_url}. Ricerca post..."})
 
-            try:
-                posts = await get_linkedin_posts(client, date_from, date_to, person_linkedin_url=match.linkedin_url)
-            except CrustdataAPIError as exc:
-                summary["errors"] += 1
-                yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Errore nel recupero dei post: {exc}"})
-                weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": f"Errore post: {exc}", "giorni": giorni})
-                summary["processed"] += 1
-                continue
+            if match.linkedin_url in posts_cache:
+                posts = posts_cache[match.linkedin_url]
+            else:
+                try:
+                    posts = await get_linkedin_posts(client, date_from, date_to, person_linkedin_url=match.linkedin_url)
+                except CrustdataAPIError as exc:
+                    summary["errors"] += 1
+                    yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Errore nel recupero dei post: {exc}"})
+                    weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": f"Errore post: {exc}", "giorni": giorni})
+                    summary["processed"] += 1
+                    continue
+                posts_cache[match.linkedin_url] = posts
 
             if not posts:
                 yield _sse("progress", {"index": idx, "total": total, "email": email, "message": "Nessun post trovato nel periodo selezionato."})
@@ -353,6 +379,10 @@ async def _process_company_job(job_id: str):
     summary = {"processed": 0, "profiles_found": 0, "profiles_not_found": 0, "unverified_matches": 0, "errors": 0, "total_posts": 0}
 
     config_error: Optional[str] = None
+    # Cache dei post già recuperati in questo job, per URL pagina azienda: se
+    # due nomi diversi (es. varianti di scrittura) risolvono alla stessa
+    # pagina LinkedIn, evita di richiamare get_linkedin_posts due volte.
+    posts_cache: dict[str, list[dict]] = {}
 
     async with httpx.AsyncClient() as client:
         for idx, company in enumerate(companies, start=1):
@@ -407,16 +437,20 @@ async def _process_company_job(job_id: str):
             summary["profiles_found"] += 1
             yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Pagina trovata: {match.name or match.linkedin_url}. Ricerca post..."})
 
-            try:
-                posts = await _with_rate_limit_retry(
-                    lambda: get_linkedin_posts(client, date_from, date_to, company_linkedin_url=match.linkedin_url)
-                )
-            except CrustdataAPIError as exc:
-                summary["errors"] += 1
-                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore nel recupero dei post: {exc}"})
-                weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": f"Errore post: {exc}", "giorni": giorni})
-                summary["processed"] += 1
-                continue
+            if match.linkedin_url in posts_cache:
+                posts = posts_cache[match.linkedin_url]
+            else:
+                try:
+                    posts = await _with_rate_limit_retry(
+                        lambda: get_linkedin_posts(client, date_from, date_to, company_linkedin_url=match.linkedin_url)
+                    )
+                except CrustdataAPIError as exc:
+                    summary["errors"] += 1
+                    yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore nel recupero dei post: {exc}"})
+                    weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": f"Errore post: {exc}", "giorni": giorni})
+                    summary["processed"] += 1
+                    continue
+                posts_cache[match.linkedin_url] = posts
 
             if not posts:
                 yield _sse("progress", {"index": idx, "total": total, "email": company, "message": "Nessun post trovato nel periodo selezionato."})
