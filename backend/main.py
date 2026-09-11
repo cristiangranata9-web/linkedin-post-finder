@@ -46,6 +46,20 @@ from excel_utils import (
     read_topics_from_editorial_plan_xlsx,
 )
 
+async def _with_rate_limit_retry(coro_fn, *, max_attempts: int = 4, base_delay: float = 8.0):
+    """Esegue `coro_fn()` ritentando con backoff se Crustdata risponde 429
+    (rate limit). Non nasconde altri errori: solo il 429 viene ritentato,
+    tutto il resto (404, 401, altri 4xx/5xx) viene propagato subito."""
+    for attempt in range(max_attempts):
+        try:
+            return await coro_fn()
+        except CrustdataAPIError as exc:
+            if exc.status_code == 429 and attempt < max_attempts - 1:
+                await asyncio.sleep(base_delay * (attempt + 1))
+                continue
+            raise
+
+
 app = FastAPI(title="LinkedIn Post Finder - Backend")
 
 _allowed_origins = os.environ.get("FRONTEND_ORIGIN", "*")
@@ -334,13 +348,20 @@ async def _process_company_job(job_id: str):
 
     async with httpx.AsyncClient() as client:
         for idx, company in enumerate(companies, start=1):
+            if idx > 1:
+                # Piccola pausa tra un'azienda e l'altra per non saturare il
+                # rate limit di Crustdata (ogni azienda può generare più di
+                # una chiamata a /company/identify).
+                await asyncio.sleep(1.5)
             yield _sse("progress", {"index": idx, "total": total, "email": company, "message": "Ricerca pagina LinkedIn azienda..."})
 
             giorni: dict[str, list[str]] = {g: [] for g in GIORNI_IT}
             row_common = {"email": company}
 
             try:
-                resolution = await resolve_company_to_profile(client, company)
+                resolution = await _with_rate_limit_retry(
+                    lambda: resolve_company_to_profile(client, company)
+                )
             except CrustdataConfigError as exc:
                 config_error = str(exc)
                 yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore di configurazione: {exc}"})
@@ -379,7 +400,9 @@ async def _process_company_job(job_id: str):
             yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Pagina trovata: {match.name or match.linkedin_url}. Ricerca post..."})
 
             try:
-                posts = await get_linkedin_posts(client, date_from, date_to, company_linkedin_url=match.linkedin_url)
+                posts = await _with_rate_limit_retry(
+                    lambda: get_linkedin_posts(client, date_from, date_to, company_linkedin_url=match.linkedin_url)
+                )
             except CrustdataAPIError as exc:
                 summary["errors"] += 1
                 yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore nel recupero dei post: {exc}"})

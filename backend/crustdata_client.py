@@ -23,12 +23,66 @@ viene propagata un'eccezione con un messaggio esplicito.
 from __future__ import annotations
 
 import os
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import httpx
 
 CRUSTDATA_BASE_URL = "https://api.crustdata.com"
+
+# Suffissi/forme societarie generiche che su LinkedIn di norma NON compaiono
+# nel nome della pagina aziendale (es. "OpenEconomics" e non "OpenEconomics
+# Srl"). Se lasciati nella query, l'endpoint fuzzy /company/identify li
+# tratta come parole di ricerca a sé stanti e restituisce centinaia di
+# aziende nel mondo che contengono lo stesso acronimo (es. "Srl" compare
+# anche in ragioni sociali sudamericane, indiane, ecc.), annegando il match
+# corretto in mezzo a rumore. Vengono rimossi solo come TOKEN separati (word
+# boundary), mai come sottostringa, per non alterare nomi propri.
+_LEGAL_SUFFIX_TOKENS = [
+    r"s\.?\s*r\.?\s*l\.?\s*s\.?",  # Srls / S.r.l.s.
+    r"s\.?\s*r\.?\s*l\.?",  # Srl / S.r.l.
+    r"s\.?\s*p\.?\s*a\.?",  # SpA / S.p.A.
+    r"s\.?\s*a\.?\s*s\.?",  # Sas / S.a.s.
+    r"s\.?\s*n\.?\s*c\.?",  # Snc / S.n.c.
+    r"s\.?\s*c\.?\s*a\.?\s*r\.?\s*l\.?",  # Scarl
+    r"soc\.?\s*coop\.?(\s*a\s*r\s*l\.?)?",
+    r"cooperativa",
+    r"soc(iet[aà])?\.?",
+    r"aps",
+    r"ets",
+    r"onlus",
+    r"aisbl",
+    r"ltd",
+    r"inc",
+    r"llc",
+    r"gmbh",
+]
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(" + "|".join(_LEGAL_SUFFIX_TOKENS) + r")\b\.?", re.IGNORECASE
+)
+
+
+def _strip_legal_suffixes(name: str) -> str:
+    """Rimuove forme societarie generiche (Srl, SPA, Soc. Coop., ecc.) da un
+    nome azienda, per aumentare le probabilità di match esatto col nome
+    usato sulla pagina LinkedIn. Non inventa né modifica il resto del nome."""
+    cleaned = _LEGAL_SUFFIX_RE.sub(" ", name)
+    cleaned = re.sub(r"[.,]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—")
+    return cleaned or name
+
+
+def _normalize_for_compare(name: str) -> str:
+    """Normalizza un nome azienda per confronti case/accenti/punteggiatura
+    -insensitive (usato solo per verificare che un candidato fuzzy
+    corrisponda davvero al nome cercato, mai per indovinare tra ambiguità
+    reali)."""
+    decomposed = unicodedata.normalize("NFKD", name)
+    ascii_only = decomposed.encode("ascii", "ignore").decode("ascii")
+    ascii_only = re.sub(r"[^a-z0-9 ]", " ", ascii_only.lower())
+    return re.sub(r"\s+", " ", ascii_only).strip()
 
 
 class CrustdataConfigError(RuntimeError):
@@ -245,10 +299,10 @@ async def resolve_email_to_profile(client: httpx.AsyncClient, email: str) -> Res
     return result
 
 
-async def v2_company_identify(client: httpx.AsyncClient, company_name: str) -> ResolutionResult:
-    """
-    POST /company/identify (v2, 2025-11-01) - risoluzione nome azienda -> pagina
-    LinkedIn aziendale.
+async def _company_identify_call(
+    client: httpx.AsyncClient, company_name: str, exact_match: bool
+) -> list[ProfileMatch]:
+    """Singola chiamata POST /company/identify (v2), parsing incluso.
 
     Verificato con una chiamata reale: corpo `{"names": [...]}`, risposta
     `[{"matched_on": ..., "match_type": ..., "matches": [{"confidence_score":
@@ -260,9 +314,9 @@ async def v2_company_identify(client: httpx.AsyncClient, company_name: str) -> R
     come "endpoint/schema da verificare", mai confuso con "azienda non trovata".
     """
     url = f"{CRUSTDATA_BASE_URL}/company/identify"
-    body = {
-        "names": [company_name],
-    }
+    body: dict[str, Any] = {"names": [company_name]}
+    if exact_match:
+        body["exact_match"] = True
     try:
         resp = await client.post(url, headers=_headers(v2=True), json=body, timeout=30.0)
     except httpx.RequestError as exc:
@@ -309,19 +363,55 @@ async def v2_company_identify(client: httpx.AsyncClient, company_name: str) -> R
                         confidence=m.get("confidence_score"),
                     )
                 )
+    return matches
 
+
+def _evaluate_matches(matches: list[ProfileMatch]) -> ResolutionResult:
     if not matches:
         return ResolutionResult(status="not_found", matches=[], source="v2_company_identify")
-
     if len(matches) == 1:
         m = matches[0]
         if m.confidence is not None and m.confidence < MIN_CONFIDENCE:
             return ResolutionResult(status="ambiguous", matches=matches, source="v2_company_identify")
         return ResolutionResult(status="resolved", matches=matches, source="v2_company_identify")
-
     # Più match: non scegliamo arbitrariamente (es. "Confindustria Nautica"
-    # che matcha anche la generica "Confindustria").
+    # che matcha anche la generica "Confindustria", o "ENEA" che è il nome
+    # esatto di più aziende diverse nel mondo).
     return ResolutionResult(status="ambiguous", matches=matches, source="v2_company_identify")
+
+
+async def v2_company_identify(client: httpx.AsyncClient, company_name: str) -> ResolutionResult:
+    """
+    Risoluzione nome azienda -> pagina LinkedIn aziendale, in due passaggi:
+
+    1. Si prova `exact_match=true` sul nome ripulito da forme societarie
+       generiche (Srl, SPA, Soc. Coop., ecc. - vedi `_strip_legal_suffixes`),
+       perché su LinkedIn le pagine aziendali di solito non includono la
+       forma societaria nel nome (es. "OpenEconomics", non "OpenEconomics
+       Srl"). Se produce match, si usano direttamente (nessuna azienda
+       inventata: sono comunque risultati letterali dell'API).
+    2. Se il passaggio esatto non trova nulla, si ricade sulla ricerca fuzzy
+       di default sullo stesso nome ripulito, filtrando però i candidati per
+       tenere solo quelli il cui nome (normalizzato: minuscolo, senza
+       accenti/punteggiatura) coincide esattamente col nome cercato - questo
+       perché la ricerca fuzzy tratta acronimi societari generici come "Srl"
+       come parole di ricerca a sé stanti e restituisce centinaia di aziende
+       nel mondo che li contengono, annegando il match corretto in mezzo a
+       rumore con la stessa confidenza.
+
+    In nessun caso viene scelto un profilo arbitrariamente tra più candidati
+    realmente ambigui (es. "ENEA", nome esatto di aziende diverse nel mondo).
+    """
+    clean_name = _strip_legal_suffixes(company_name)
+
+    exact_matches = await _company_identify_call(client, clean_name, exact_match=True)
+    if exact_matches:
+        return _evaluate_matches(exact_matches)
+
+    fuzzy_matches = await _company_identify_call(client, clean_name, exact_match=False)
+    target = _normalize_for_compare(clean_name)
+    filtered = [m for m in fuzzy_matches if m.name and _normalize_for_compare(m.name) == target]
+    return _evaluate_matches(filtered)
 
 
 async def resolve_company_to_profile(client: httpx.AsyncClient, company_name: str) -> ResolutionResult:
@@ -354,6 +444,11 @@ async def get_linkedin_posts(
     consumare crediti oltre il necessario: la fatturazione è per post
     restituito). Nessuna deduplicazione: tutti i post nel range vengono tenuti,
     anche più nello stesso giorno.
+
+    NOTA: l'API accetta "page" o "limit", mai entrambi insieme (risposta 400
+    "Only one of 'page' or 'limit' can be provided, not both" se passati
+    contemporaneamente) - qui si usa solo "page", con la dimensione pagina di
+    default del server.
     """
     from datetime import datetime, timezone
 
@@ -375,7 +470,6 @@ async def get_linkedin_posts(
                 headers=_headers(v2=False),
                 params={
                     **base_params,
-                    "limit": 100,
                     "page": page,
                     "response_format": "json",
                     "compact": "true",
