@@ -44,6 +44,37 @@ Quando è attiva:
 - non è per-utente: tutti i colleghi condividono la stessa password, non
   c'è tracciamento di chi ha fatto cosa.
 
+## Ricerca Soci/Partner (Cluster MINIT) — generale o per tematica
+
+Oltre alla ricerca per email (colonna "Email" in un .xlsx), l'app offre una
+seconda modalità pensata per l'elenco soci/partner del Cluster, fornito come
+file **.docx** (elenco di nomi di aziende/enti, senza email né URL). Le due
+modalità condividono lo stesso file .docx in input:
+
+- **Ricerca generale**: per ciascun nome trova la pagina LinkedIn aziendale
+  corrispondente e recupera tutti i post pubblicati nel periodo scelto —
+  stesso comportamento della ricerca per email, senza alcun filtro.
+- **Ricerca per tematica**: fa lo stesso, e in più richiede il **piano
+  editoriale** (.xlsx, colonna "Area Tematica"). Ogni post recuperato viene
+  classificato tramite l'API gratuita di **Google Gemini** sulle tematiche
+  presenti nel piano editoriale caricato: nessuna tematica viene mai
+  inventata, solo quelle effettivamente elencate nel file (o "Nessuna
+  tematica" se il post non rientra in nessuna). Il risultato mostra sempre
+  **tutti** i post trovati, con la tematica assegnata in una colonna
+  dedicata; un filtro a tendina nella vista dettagliata permette di
+  visualizzare solo una tematica alla volta, senza scartare gli altri dati.
+
+Come per la ricerca email, un nome che matcha più pagine LinkedIn candidate
+(es. un acronimo che corrisponde sia all'ente specifico sia a un'entità più
+generica) viene segnalato come **"Match non verificato"**, mai scelto a
+caso.
+
+Questa modalità richiede in più la variabile d'ambiente `GEMINI_API_KEY`
+(vedi `.env.example`), usata **solo** per la classificazione dei post nella
+ricerca per tematica — non serve per la ricerca generale né per quella per
+email. È una chiave **gratuita** (nessuna carta di credito richiesta),
+ottenibile su https://aistudio.google.com/apikey.
+
 ## Struttura del progetto
 
 ```
@@ -53,6 +84,8 @@ linkedin-scraper-app/
 │   ├── main.py                # API FastAPI + serve anche il frontend statico
 │   ├── crustdata_client.py    # chiamate reali all'API Crustdata
 │   ├── excel_utils.py         # lettura input / generazione output .xlsx
+│   ├── docx_utils.py          # lettura elenco soci/partner da .docx
+│   ├── gemini_classifier.py   # classificazione post per tematica (Gemini)
 │   ├── requirements.txt
 │   └── .env.example
 └── frontend/

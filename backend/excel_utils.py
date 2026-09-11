@@ -56,6 +56,64 @@ def read_emails_from_xlsx(file_bytes: bytes) -> list[str]:
     return emails
 
 
+def read_topics_from_editorial_plan_xlsx(file_bytes: bytes) -> list[str]:
+    """
+    Legge le tematiche uniche dalla colonna 'Area Tematica' del piano
+    editoriale (cerca la colonna in tutti i fogli del file, nell'ordine in
+    cui compaiono, e restituisce i valori unici nell'ordine di prima
+    comparsa). Nessuna tematica viene inventata: solo quelle presenti nel
+    file caricato.
+    """
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise InputFileError(f"Impossibile leggere il piano editoriale .xlsx: {exc}") from exc
+
+    topics: list[str] = []
+    seen: set[str] = set()
+
+    for ws in wb.worksheets:
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            continue
+
+        # L'intestazione non è necessariamente sulla prima riga: i fogli
+        # osservati hanno righe di titolo sopra l'intestazione vera. Si cerca
+        # la prima riga che contiene esattamente una cella "Area Tematica".
+        header_row_idx = None
+        col = None
+        for i, row in enumerate(rows[:20]):
+            header = [str(c).strip() if c is not None else "" for c in row]
+            try:
+                col = next(j for j, h in enumerate(header) if h.lower() == "area tematica")
+                header_row_idx = i
+                break
+            except StopIteration:
+                continue
+
+        if header_row_idx is None:
+            continue
+
+        for row in rows[header_row_idx + 1 :]:
+            if col >= len(row):
+                continue
+            value = row[col]
+            if value is None:
+                continue
+            value = str(value).strip()
+            if value and value not in seen:
+                seen.add(value)
+                topics.append(value)
+
+    if not topics:
+        raise InputFileError(
+            "Non trovo una colonna intestata 'Area Tematica' in nessun foglio del "
+            "piano editoriale caricato."
+        )
+
+    return topics
+
+
 HEADER_FILL = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 LINK_FONT = Font(color="1D4ED8", underline="single")
@@ -70,16 +128,19 @@ def _style_header(ws, ncols: int):
     ws.freeze_panes = "A2"
 
 
-def build_weekly_xlsx(weekly_rows: list[dict[str, Any]]) -> bytes:
+def build_weekly_xlsx(weekly_rows: list[dict[str, Any]], entity_label: str = "Email") -> bytes:
     """
-    Colonne: Email | Nome profilo LinkedIn | URL profilo LinkedIn |
+    Colonne: <entity_label> | Nome profilo LinkedIn | URL profilo LinkedIn |
              Lunedì..Domenica (link multipli impilati nella stessa cella).
+
+    entity_label permette di riusare la stessa funzione sia per la ricerca
+    per email ("Email") sia per la ricerca per azienda/socio ("Azienda").
     """
     wb = Workbook()
     ws = wb.active
     ws.title = "Vista settimanale"
 
-    headers = ["Email", "Nome profilo LinkedIn", "URL profilo LinkedIn"] + GIORNI_IT
+    headers = [entity_label, "Nome profilo LinkedIn", "URL profilo LinkedIn"] + GIORNI_IT
     ws.append(headers)
     _style_header(ws, len(headers))
 
@@ -120,23 +181,30 @@ def build_weekly_xlsx(weekly_rows: list[dict[str, Any]]) -> bytes:
     return buf.getvalue()
 
 
-def build_detailed_xlsx(detailed_rows: list[dict[str, Any]]) -> bytes:
+def build_detailed_xlsx(
+    detailed_rows: list[dict[str, Any]],
+    entity_label: str = "Email",
+    include_topic: bool = False,
+) -> bytes:
     """
-    Colonne: Email | Nome profilo LinkedIn | URL profilo LinkedIn |
-             Data del post | Giorno della settimana | Link al post
+    Colonne: <entity_label> | Nome profilo LinkedIn | URL profilo LinkedIn |
+             Data del post | Giorno della settimana | Link al post |
+             [Area Tematica, se include_topic=True]
     """
     wb = Workbook()
     ws = wb.active
     ws.title = "Vista dettagliata"
 
     headers = [
-        "Email",
+        entity_label,
         "Nome profilo LinkedIn",
         "URL profilo LinkedIn",
         "Data del post",
         "Giorno della settimana",
         "Link al post",
     ]
+    if include_topic:
+        headers.append("Area Tematica")
     ws.append(headers)
     _style_header(ws, len(headers))
 
@@ -160,8 +228,10 @@ def build_detailed_xlsx(detailed_rows: list[dict[str, Any]]) -> bytes:
             c.font = LINK_FONT
         else:
             ws.cell(row=r, column=6, value="")
+        if include_topic:
+            ws.cell(row=r, column=7, value=row.get("topic", ""))
 
-    widths = [28, 24, 40, 16, 20, 50]
+    widths = [28, 24, 40, 16, 20, 50] + ([26] if include_topic else [])
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 

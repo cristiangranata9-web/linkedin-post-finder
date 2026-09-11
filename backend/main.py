@@ -28,18 +28,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from gemini_classifier import ClassifierAPIError, ClassifierConfigError, classify_posts
 from crustdata_client import (
     CrustdataAPIError,
     CrustdataConfigError,
     get_linkedin_posts,
+    resolve_company_to_profile,
     resolve_email_to_profile,
 )
+from docx_utils import read_company_names_from_docx
 from excel_utils import (
     GIORNI_IT,
     InputFileError,
     build_detailed_xlsx,
     build_weekly_xlsx,
     read_emails_from_xlsx,
+    read_topics_from_editorial_plan_xlsx,
 )
 
 app = FastAPI(title="LinkedIn Post Finder - Backend")
@@ -128,6 +132,7 @@ async def create_job(
     job_id = str(uuid.uuid4())
     JOBS[job_id] = {
         "created_at": datetime.utcnow(),
+        "kind": "email",
         "emails": emails,
         "date_from": date_from,
         "date_to": date_to,
@@ -136,6 +141,71 @@ async def create_job(
         "results": None,
     }
     return {"job_id": job_id, "total_emails": len(emails), "date_from": str(date_from), "date_to": str(date_to)}
+
+
+@app.post("/api/company-jobs", dependencies=[Depends(_verify_password)])
+async def create_company_job(
+    file: UploadFile = File(...),
+    mode: str = Form(...),
+    period: str = Form(...),
+    custom_start: Optional[str] = Form(None),
+    custom_end: Optional[str] = Form(None),
+    plan_file: Optional[UploadFile] = File(None),
+):
+    """
+    Crea un job di ricerca a partire dall'elenco soci/partner in formato
+    .docx. mode="general" cerca tutti i post nel periodo, senza filtri.
+    mode="topic" richiede in più il piano editoriale (.xlsx) da cui vengono
+    lette le tematiche disponibili; i post trovati vengono poi classificati
+    per tematica (vedi claude_classifier.py), senza mai scartare risultati
+    reali: ogni post recuperato compare comunque nell'output, con la
+    tematica assegnata (o "Nessuna tematica" se nessuna si applica).
+    """
+    _cleanup_jobs()
+
+    if not file.filename.lower().endswith(".docx"):
+        raise HTTPException(400, "Il file dell'elenco soci/partner deve essere in formato .docx.")
+    if mode not in ("general", "topic"):
+        raise HTTPException(400, "mode deve essere 'general' oppure 'topic'.")
+
+    content = await file.read()
+    try:
+        companies = read_company_names_from_docx(content)
+    except InputFileError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    topics: list[str] = []
+    if mode == "topic":
+        if not plan_file:
+            raise HTTPException(400, "La ricerca per tematica richiede il piano editoriale (.xlsx).")
+        plan_content = await plan_file.read()
+        try:
+            topics = read_topics_from_editorial_plan_xlsx(plan_content)
+        except InputFileError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    date_from, date_to = _compute_date_range(period, custom_start, custom_end)
+
+    job_id = str(uuid.uuid4())
+    JOBS[job_id] = {
+        "created_at": datetime.utcnow(),
+        "kind": "company",
+        "mode": mode,
+        "companies": companies,
+        "topics": topics,
+        "date_from": date_from,
+        "date_to": date_to,
+        "started": False,
+        "status": "pending",
+        "results": None,
+    }
+    return {
+        "job_id": job_id,
+        "total_companies": len(companies),
+        "date_from": str(date_from),
+        "date_to": str(date_to),
+        "topics": topics,
+    }
 
 
 def _sse(event: str, data: dict) -> str:
@@ -207,7 +277,7 @@ async def _process_job(job_id: str):
             yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Profilo trovato: {match.name or match.linkedin_url}. Ricerca post..."})
 
             try:
-                posts = await get_linkedin_posts(client, match.linkedin_url, date_from, date_to)
+                posts = await get_linkedin_posts(client, date_from, date_to, person_linkedin_url=match.linkedin_url)
             except CrustdataAPIError as exc:
                 summary["errors"] += 1
                 yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Errore nel recupero dei post: {exc}"})
@@ -248,6 +318,138 @@ async def _process_job(job_id: str):
     yield _sse("result", result_payload)
 
 
+async def _process_company_job(job_id: str):
+    job = JOBS[job_id]
+    companies = job["companies"]
+    mode = job["mode"]
+    topics = job["topics"]
+    date_from, date_to = job["date_from"], job["date_to"]
+    total = len(companies)
+
+    weekly_rows = []
+    detailed_rows = []
+    summary = {"processed": 0, "profiles_found": 0, "profiles_not_found": 0, "unverified_matches": 0, "errors": 0, "total_posts": 0}
+
+    config_error: Optional[str] = None
+
+    async with httpx.AsyncClient() as client:
+        for idx, company in enumerate(companies, start=1):
+            yield _sse("progress", {"index": idx, "total": total, "email": company, "message": "Ricerca pagina LinkedIn azienda..."})
+
+            giorni: dict[str, list[str]] = {g: [] for g in GIORNI_IT}
+            row_common = {"email": company}
+
+            try:
+                resolution = await resolve_company_to_profile(client, company)
+            except CrustdataConfigError as exc:
+                config_error = str(exc)
+                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore di configurazione: {exc}"})
+                summary["errors"] += 1
+                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": "Errore configurazione backend", "giorni": giorni})
+                summary["processed"] += 1
+                break
+
+            if resolution.status == "error":
+                summary["errors"] += 1
+                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore: {resolution.error_message}"})
+                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": f"Errore: {resolution.error_message}", "giorni": giorni})
+                summary["processed"] += 1
+                continue
+
+            if resolution.status == "not_found":
+                summary["profiles_not_found"] += 1
+                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": "Pagina LinkedIn non trovata."})
+                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": "Pagina non trovata", "giorni": giorni})
+                detailed_rows.append({**row_common, "profile_name": "", "profile_url": "", "post_date": "", "day_of_week": "", "post_link": "Pagina non trovata", "text": None})
+                summary["processed"] += 1
+                continue
+
+            if resolution.status == "ambiguous":
+                summary["unverified_matches"] += 1
+                candidates = ", ".join(m.linkedin_url for m in resolution.matches[:5])
+                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Match non verificato ({len(resolution.matches)} pagine candidate)."})
+                weekly_rows.append({**row_common, "profile_name": None, "profile_url": None, "status_label": f"Match non verificato: {candidates}", "giorni": giorni})
+                detailed_rows.append({**row_common, "profile_name": "", "profile_url": "", "post_date": "", "day_of_week": "", "post_link": f"Match non verificato ({len(resolution.matches)} candidati)", "text": None})
+                summary["processed"] += 1
+                continue
+
+            # resolved
+            match = resolution.matches[0]
+            summary["profiles_found"] += 1
+            yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Pagina trovata: {match.name or match.linkedin_url}. Ricerca post..."})
+
+            try:
+                posts = await get_linkedin_posts(client, date_from, date_to, company_linkedin_url=match.linkedin_url)
+            except CrustdataAPIError as exc:
+                summary["errors"] += 1
+                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore nel recupero dei post: {exc}"})
+                weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": f"Errore post: {exc}", "giorni": giorni})
+                summary["processed"] += 1
+                continue
+
+            if not posts:
+                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": "Nessun post trovato nel periodo selezionato."})
+                weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": "Nessun post trovato", "giorni": giorni})
+                detailed_rows.append({**row_common, "profile_name": match.name or "", "profile_url": match.linkedin_url, "post_date": "", "day_of_week": "", "post_link": "Nessun post trovato", "text": None})
+            else:
+                for p in posts:
+                    giorno_idx = p["date"].weekday()  # 0=Lunedì
+                    giorno_nome = GIORNI_IT[giorno_idx]
+                    if p["url"]:
+                        giorni[giorno_nome].append(p["url"])
+                    detailed_rows.append(
+                        {
+                            **row_common,
+                            "profile_name": match.name or "",
+                            "profile_url": match.linkedin_url,
+                            "post_date": p["date"].strftime("%Y-%m-%d"),
+                            "day_of_week": giorno_nome,
+                            "post_link": p["url"] or "",
+                            "text": p.get("text"),
+                        }
+                    )
+                summary["total_posts"] += len(posts)
+                weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": "", "giorni": giorni})
+                yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Ricerca completata: {len(posts)} post trovati."})
+
+            summary["processed"] += 1
+
+    classify_error: Optional[str] = None
+    if mode == "topic" and topics:
+        real_post_indices = [i for i, r in enumerate(detailed_rows) if r.get("text")]
+        if real_post_indices:
+            yield _sse(
+                "progress",
+                {"index": total, "total": total, "email": "", "message": f"Classificazione tematica di {len(real_post_indices)} post con Gemini..."},
+            )
+            try:
+                to_classify = [{"text": detailed_rows[i]["text"]} for i in real_post_indices]
+                assigned = await classify_posts(to_classify, topics)
+                for pos, i in enumerate(real_post_indices):
+                    detailed_rows[i]["topic"] = assigned[pos] or "Nessuna tematica"
+            except (ClassifierConfigError, ClassifierAPIError) as exc:
+                classify_error = str(exc)
+                for i in real_post_indices:
+                    detailed_rows[i]["topic"] = "Errore classificazione"
+
+    for r in detailed_rows:
+        r.pop("text", None)
+
+    result_payload = {
+        "weekly_rows": weekly_rows,
+        "detailed_rows": detailed_rows,
+        "summary": summary,
+        "config_error": config_error,
+        "classify_error": classify_error,
+        "mode": mode,
+        "topics": topics,
+    }
+    job["results"] = result_payload
+    job["status"] = "done"
+    yield _sse("summary", summary)
+    yield _sse("result", result_payload)
+
+
 @app.get("/api/jobs/{job_id}/stream", dependencies=[Depends(_verify_password)])
 async def stream_job(job_id: str):
     job = JOBS.get(job_id)
@@ -258,8 +460,12 @@ async def stream_job(job_id: str):
     job["started"] = True
 
     async def event_gen():
-        async for chunk in _process_job(job_id):
-            yield chunk
+        if job.get("kind") == "company":
+            async for chunk in _process_company_job(job_id):
+                yield chunk
+        else:
+            async for chunk in _process_job(job_id):
+                yield chunk
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
@@ -271,11 +477,15 @@ async def export_job(job_id: str, type: str = "weekly"):
         raise HTTPException(404, "Risultati non disponibili per questo job.")
 
     results = job["results"]
+    is_company = job.get("kind") == "company"
+    entity_label = "Azienda/Socio" if is_company else "Email"
+    include_topic = is_company and job.get("mode") == "topic"
+
     if type == "weekly":
-        content = build_weekly_xlsx(results["weekly_rows"])
+        content = build_weekly_xlsx(results["weekly_rows"], entity_label=entity_label)
         filename = "linkedin_post_settimanale.xlsx"
     elif type == "detailed":
-        content = build_detailed_xlsx(results["detailed_rows"])
+        content = build_detailed_xlsx(results["detailed_rows"], entity_label=entity_label, include_topic=include_topic)
         filename = "linkedin_post_dettagliato.xlsx"
     else:
         raise HTTPException(400, "type deve essere 'weekly' oppure 'detailed'.")
@@ -293,6 +503,7 @@ async def health():
     return {
         "status": "ok",
         "crustdata_api_key_configured": has_key,
+        "gemini_api_key_configured": bool(os.environ.get("GEMINI_API_KEY")),
         "password_protected": bool(APP_PASSWORD),
     }
 

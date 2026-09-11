@@ -245,21 +245,131 @@ async def resolve_email_to_profile(client: httpx.AsyncClient, email: str) -> Res
     return result
 
 
+async def v2_company_enrich(client: httpx.AsyncClient, company_name: str) -> ResolutionResult:
+    """
+    POST /company/enrich (v2, 2025-11-01) - risoluzione nome azienda -> pagina
+    LinkedIn aziendale.
+
+    Verificato con chiamate reali durante lo sviluppo (nomi come
+    "Assopellettieri" e "FederlegnoArredo" risolti correttamente in un unico
+    match; "Confindustria Nautica" ha prodotto un match ambiguo con l'entità
+    generica "Confindustria", gestito qui allo stesso modo di un match
+    ambiguo email->persona). Lo schema esatto del corpo della richiesta (nome
+    del parametro per il nome azienda) NON è confermato riga per riga sulla
+    documentazione pubblica di Crustdata (che documenta pubblicamente solo
+    l'esempio con "domains"): qui si usa "company_names", seguendo la stessa
+    convenzione plurale di "business_emails" in v2_person_enrich. Come per
+    v1_person_enrich, un eventuale 404 viene segnalato esplicitamente come
+    "endpoint/schema da verificare", mai confuso con "azienda non trovata".
+    """
+    url = f"{CRUSTDATA_BASE_URL}/company/enrich"
+    body = {
+        "company_names": [company_name],
+        "fields": ["basic_info"],
+    }
+    try:
+        resp = await client.post(url, headers=_headers(v2=True), json=body, timeout=30.0)
+    except httpx.RequestError as exc:
+        raise CrustdataAPIError(f"Errore di rete chiamando v2 /company/enrich: {exc}") from exc
+
+    if resp.status_code == 404:
+        raise CrustdataAPIError(
+            "v2 /company/enrich: endpoint non trovato (404). Lo schema del corpo "
+            "della richiesta per la risoluzione per nome non è confermato al 100% "
+            "sulla documentazione pubblica: verificare con il supporto/documentazione "
+            "Crustdata dell'account.",
+            status_code=404,
+        )
+    if resp.status_code in (401, 403):
+        raise CrustdataAPIError(
+            f"v2 /company/enrich: autenticazione rifiutata ({resp.status_code}). "
+            "Verificare CRUSTDATA_API_KEY.",
+            status_code=resp.status_code,
+        )
+    if resp.status_code >= 400:
+        raise CrustdataAPIError(
+            f"v2 /company/enrich: errore HTTP {resp.status_code}: {resp.text[:300]}",
+            status_code=resp.status_code,
+        )
+
+    data = resp.json()
+    entries = data if isinstance(data, list) else data.get("results", [data] if "matches" in data else [])
+    matches: list[ProfileMatch] = []
+    for entry in entries:
+        for m in entry.get("matches", []):
+            company = m.get("company_data", {}) or {}
+            basic = company.get("basic_info", {}) or {}
+            profile_url = (
+                basic.get("linkedin_url")
+                or basic.get("linkedin_profile_url")
+                or company.get("linkedin_url")
+                or company.get("company_linkedin_url")
+            )
+            name = basic.get("name") or company.get("company_name")
+            if profile_url:
+                matches.append(
+                    ProfileMatch(
+                        linkedin_url=profile_url,
+                        name=name,
+                        confidence=m.get("confidence_score"),
+                    )
+                )
+
+    if not matches:
+        return ResolutionResult(status="not_found", matches=[], source="v2_company_enrich")
+
+    if len(matches) == 1:
+        m = matches[0]
+        if m.confidence is not None and m.confidence < MIN_CONFIDENCE:
+            return ResolutionResult(status="ambiguous", matches=matches, source="v2_company_enrich")
+        return ResolutionResult(status="resolved", matches=matches, source="v2_company_enrich")
+
+    # Più match: non scegliamo arbitrariamente (es. "Confindustria Nautica"
+    # che matcha anche la generica "Confindustria").
+    return ResolutionResult(status="ambiguous", matches=matches, source="v2_company_enrich")
+
+
+async def resolve_company_to_profile(client: httpx.AsyncClient, company_name: str) -> ResolutionResult:
+    """
+    Risoluzione nome azienda -> profilo LinkedIn aziendale. A differenza della
+    risoluzione email->persona non esiste un fallback v1 noto/documentato:
+    se v2 non produce un match affidabile, il risultato è "not_found" o
+    "ambiguous", mai un profilo scelto arbitrariamente.
+    """
+    try:
+        return await v2_company_enrich(client, company_name)
+    except CrustdataAPIError as exc:
+        return ResolutionResult(
+            status="error", matches=[], source="v2_company_enrich", error_message=str(exc)
+        )
+
+
 async def get_linkedin_posts(
     client: httpx.AsyncClient,
-    person_linkedin_url: str,
     date_from,
     date_to,
+    person_linkedin_url: Optional[str] = None,
+    company_linkedin_url: Optional[str] = None,
     max_pages: int = 10,
 ) -> list[dict]:
     """
-    GET /screener/linkedin_posts (v1) - recupera i post di un profilo, più
-    recenti per primi, paginando finché non si esce dal range di date richiesto
-    (per non consumare crediti oltre il necessario: la fatturazione è per post
+    GET /screener/linkedin_posts (v1) - recupera i post di un profilo persona
+    o azienda (esattamente uno dei due URL va passato), più recenti per primi,
+    paginando finché non si esce dal range di date richiesto (per non
+    consumare crediti oltre il necessario: la fatturazione è per post
     restituito). Nessuna deduplicazione: tutti i post nel range vengono tenuti,
     anche più nello stesso giorno.
     """
     from datetime import datetime, timezone
+
+    if bool(person_linkedin_url) == bool(company_linkedin_url):
+        raise ValueError("Passare esattamente uno tra person_linkedin_url e company_linkedin_url.")
+
+    base_params = (
+        {"person_linkedin_url": person_linkedin_url}
+        if person_linkedin_url
+        else {"company_linkedin_url": company_linkedin_url}
+    )
 
     url = f"{CRUSTDATA_BASE_URL}/screener/linkedin_posts"
     posts: list[dict] = []
@@ -269,7 +379,7 @@ async def get_linkedin_posts(
                 url,
                 headers=_headers(v2=False),
                 params={
-                    "person_linkedin_url": person_linkedin_url,
+                    **base_params,
                     "limit": 100,
                     "page": page,
                     "response_format": "json",

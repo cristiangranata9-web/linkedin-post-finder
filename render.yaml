@@ -16,6 +16,8 @@ services:
     envVars:
       - key: CRUSTDATA_API_KEY
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
       - key: FRONTEND_ORIGIN
         value: "*"
       - key: APP_PASSWORD

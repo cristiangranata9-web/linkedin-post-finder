@@ -21,73 +21,167 @@
 
   <header>
     <h1>LinkedIn Post Finder</h1>
-    <p>Carica l'elenco email, trova i profili LinkedIn corrispondenti e i post pubblicati nel periodo scelto.</p>
+    <p>Trova i profili LinkedIn corrispondenti e i post pubblicati nel periodo scelto.</p>
   </header>
 
   <main class="hidden" id="app-main">
-    <section class="card">
-      <h2>1. Carica file e imposta il periodo</h2>
-      <div class="form-row">
-        <div class="field">
-          <label for="file-input">File .xlsx (colonna "Email")</label>
-          <input type="file" id="file-input" accept=".xlsx" />
-        </div>
-        <div class="field">
-          <label for="period-select">Periodo</label>
-          <select id="period-select">
-            <option value="7">Ultimi 7 giorni</option>
-            <option value="14">Ultimi 14 giorni</option>
-            <option value="30" selected>Ultimi 30 giorni</option>
-            <option value="custom">Intervallo personalizzato</option>
-          </select>
-        </div>
-        <div class="field hidden" id="custom-range-fields">
-          <label>Dal</label>
-          <input type="date" id="custom-start" />
-        </div>
-        <div class="field hidden" id="custom-range-fields-2">
-          <label>Al</label>
-          <input type="date" id="custom-end" />
-        </div>
-        <div class="field">
-          <button id="start-btn">Avvia ricerca</button>
-        </div>
-      </div>
-      <p id="form-error" class="hidden" style="color:#b91c1c; font-size:13px; margin-top:10px;"></p>
-    </section>
+    <div class="tabs">
+      <button class="main-tab-btn active" data-main-tab="email">Ricerca per email</button>
+      <button class="main-tab-btn" data-main-tab="company">Ricerca Soci/Partner (Cluster MINIT)</button>
+    </div>
 
-    <section class="card hidden" id="progress-card">
-      <h2>2. Avanzamento</h2>
-      <div class="progress-bar-outer"><div class="progress-bar-inner" id="progress-bar"></div></div>
-      <div id="progress-log"></div>
-    </section>
-
-    <section class="card hidden" id="summary-card">
-      <h2>3. Riepilogo</h2>
-      <div class="summary-grid" id="summary-grid"></div>
-    </section>
-
-    <section class="card hidden" id="results-card">
-      <h2>4. Risultati</h2>
-      <div class="tabs">
-        <button class="tab-btn active" data-tab="weekly">Vista settimanale</button>
-        <button class="tab-btn" data-tab="detailed">Vista dettagliata</button>
-      </div>
-
-      <div id="tab-weekly">
-        <div style="margin-bottom:10px;">
-          <button class="secondary" id="export-weekly-btn">Scarica Excel (settimanale)</button>
+    <div id="main-tab-email">
+      <section class="card">
+        <h2>1. Carica file e imposta il periodo</h2>
+        <div class="form-row">
+          <div class="field">
+            <label for="file-input">File .xlsx (colonna "Email")</label>
+            <input type="file" id="file-input" accept=".xlsx" />
+          </div>
+          <div class="field">
+            <label for="period-select">Periodo</label>
+            <select id="period-select">
+              <option value="7">Ultimi 7 giorni</option>
+              <option value="14">Ultimi 14 giorni</option>
+              <option value="30" selected>Ultimi 30 giorni</option>
+              <option value="custom">Intervallo personalizzato</option>
+            </select>
+          </div>
+          <div class="field hidden" id="custom-range-fields">
+            <label>Dal</label>
+            <input type="date" id="custom-start" />
+          </div>
+          <div class="field hidden" id="custom-range-fields-2">
+            <label>Al</label>
+            <input type="date" id="custom-end" />
+          </div>
+          <div class="field">
+            <button id="start-btn">Avvia ricerca</button>
+          </div>
         </div>
-        <div class="table-wrap"><table id="weekly-table"></table></div>
-      </div>
+        <p id="form-error" class="hidden" style="color:#b91c1c; font-size:13px; margin-top:10px;"></p>
+      </section>
 
-      <div id="tab-detailed" class="hidden">
-        <div style="margin-bottom:10px;">
-          <button class="secondary" id="export-detailed-btn">Scarica Excel (dettagliato)</button>
+      <section class="card hidden" id="progress-card">
+        <h2>2. Avanzamento</h2>
+        <div class="progress-bar-outer"><div class="progress-bar-inner" id="progress-bar"></div></div>
+        <div id="progress-log"></div>
+      </section>
+
+      <section class="card hidden" id="summary-card">
+        <h2>3. Riepilogo</h2>
+        <div class="summary-grid" id="summary-grid"></div>
+      </section>
+
+      <section class="card hidden" id="results-card">
+        <h2>4. Risultati</h2>
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="weekly">Vista settimanale</button>
+          <button class="tab-btn" data-tab="detailed">Vista dettagliata</button>
         </div>
-        <div class="table-wrap"><table id="detailed-table"></table></div>
-      </div>
-    </section>
+
+        <div id="tab-weekly">
+          <div style="margin-bottom:10px;">
+            <button class="secondary" id="export-weekly-btn">Scarica Excel (settimanale)</button>
+          </div>
+          <div class="table-wrap"><table id="weekly-table"></table></div>
+        </div>
+
+        <div id="tab-detailed" class="hidden">
+          <div style="margin-bottom:10px;">
+            <button class="secondary" id="export-detailed-btn">Scarica Excel (dettagliato)</button>
+          </div>
+          <div class="table-wrap"><table id="detailed-table"></table></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="hidden" id="main-tab-company">
+      <section class="card">
+        <h2>1. Carica elenco soci/partner e imposta il periodo</h2>
+        <div class="form-row">
+          <div class="field">
+            <label for="company-file-input">File .docx (elenco soci)</label>
+            <input type="file" id="company-file-input" accept=".docx" />
+          </div>
+          <div class="field">
+            <label for="company-mode-select">Tipo di ricerca</label>
+            <select id="company-mode-select">
+              <option value="general" selected>Ricerca generale (tutti i post)</option>
+              <option value="topic">Ricerca per tematica (piano editoriale)</option>
+            </select>
+          </div>
+          <div class="field hidden" id="company-plan-field">
+            <label for="company-plan-input">Piano editoriale .xlsx (colonna "Area Tematica")</label>
+            <input type="file" id="company-plan-input" accept=".xlsx" />
+          </div>
+        </div>
+        <div class="form-row" style="margin-top:14px;">
+          <div class="field">
+            <label for="company-period-select">Periodo</label>
+            <select id="company-period-select">
+              <option value="7">Ultimi 7 giorni</option>
+              <option value="14">Ultimi 14 giorni</option>
+              <option value="30" selected>Ultimi 30 giorni</option>
+              <option value="custom">Intervallo personalizzato</option>
+            </select>
+          </div>
+          <div class="field hidden" id="company-custom-range-fields">
+            <label>Dal</label>
+            <input type="date" id="company-custom-start" />
+          </div>
+          <div class="field hidden" id="company-custom-range-fields-2">
+            <label>Al</label>
+            <input type="date" id="company-custom-end" />
+          </div>
+          <div class="field">
+            <button id="company-start-btn">Avvia ricerca</button>
+          </div>
+        </div>
+        <p id="company-form-error" class="hidden" style="color:#b91c1c; font-size:13px; margin-top:10px;"></p>
+      </section>
+
+      <section class="card hidden" id="company-progress-card">
+        <h2>2. Avanzamento</h2>
+        <div class="progress-bar-outer"><div class="progress-bar-inner" id="company-progress-bar"></div></div>
+        <div id="company-progress-log"></div>
+      </section>
+
+      <section class="card hidden" id="company-summary-card">
+        <h2>3. Riepilogo</h2>
+        <div class="summary-grid" id="company-summary-grid"></div>
+      </section>
+
+      <section class="card hidden" id="company-results-card">
+        <h2>4. Risultati</h2>
+        <div class="tabs">
+          <button class="company-tab-btn active" data-company-tab="weekly">Vista settimanale</button>
+          <button class="company-tab-btn" data-company-tab="detailed">Vista dettagliata</button>
+        </div>
+
+        <div id="company-tab-weekly">
+          <div style="margin-bottom:10px;">
+            <button class="secondary" id="company-export-weekly-btn">Scarica Excel (settimanale)</button>
+          </div>
+          <div class="table-wrap"><table id="company-weekly-table"></table></div>
+        </div>
+
+        <div id="company-tab-detailed" class="hidden">
+          <div class="form-row hidden" id="company-topic-filter-field" style="margin-bottom:10px;">
+            <div class="field">
+              <label for="company-topic-filter">Filtra per tematica</label>
+              <select id="company-topic-filter">
+                <option value="">Tutte le tematiche</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-bottom:10px;">
+            <button class="secondary" id="company-export-detailed-btn">Scarica Excel (dettagliato)</button>
+          </div>
+          <div class="table-wrap"><table id="company-detailed-table"></table></div>
+        </div>
+      </section>
+    </div>
   </main>
 
   <footer>Nessun dato viene salvato in modo permanente: i risultati vivono solo per la durata della sessione.</footer>
