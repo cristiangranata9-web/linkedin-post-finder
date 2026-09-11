@@ -23,7 +23,7 @@ from typing import Optional
 from google import genai
 from google.genai.types import GenerateContentConfig
 
-CLASSIFIER_MODEL = "gemini-2.5-flash"
+CLASSIFIER_MODEL = "gemini-3.6-flash"
 BATCH_SIZE = 20
 
 
