@@ -27,6 +27,15 @@ Su un hosting a runtime persistente (Render, Railway, Fly.io, un VPS) imposta
 `CRUSTDATA_API_KEY` nel pannello "Environment Variables" / "Secrets" del
 servizio, mai in un file versionato.
 
+## Provider per il recupero post (Crustdata o Apify)
+
+Il matching nome azienda/email -> pagina LinkedIn resta sempre su Crustdata
+(l'endpoint di matching è gratuito). Il recupero dei **post** (la parte che
+consuma più crediti Crustdata: 1 credito per post restituito) può invece
+essere fatto tramite [Apify](https://apify.com), impostando la variabile
+d'ambiente opzionale `APIFY_API_TOKEN`. Se non impostata, l'app usa
+Crustdata anche per i post (comportamento precedente, invariato).
+
 ## Accesso — password condivisa (opzionale)
 
 L'app non ha login utente/registrazione, ma supporta una **password unica

@@ -36,6 +36,8 @@ from crustdata_client import (
     resolve_company_to_profile,
     resolve_email_to_profile,
 )
+import apify_client
+from apify_client import ApifyAPIError
 from docx_utils import read_company_names_from_docx, read_emails_from_docx
 from excel_utils import (
     GIORNI_IT,
@@ -62,17 +64,47 @@ def _dedupe_preserve_order(items: list[str]) -> list[str]:
 
 
 async def _with_rate_limit_retry(coro_fn, *, max_attempts: int = 6, base_delay: float = 15.0):
-    """Esegue `coro_fn()` ritentando con backoff se Crustdata risponde 429
-    (rate limit). Non nasconde altri errori: solo il 429 viene ritentato,
-    tutto il resto (404, 401, altri 4xx/5xx) viene propagato subito."""
+    """Esegue `coro_fn()` ritentando con backoff se il provider (Crustdata o
+    Apify) risponde 429 (rate limit). Non nasconde altri errori: solo il 429
+    viene ritentato, tutto il resto (404, 401, altri 4xx/5xx) viene propagato
+    subito."""
     for attempt in range(max_attempts):
         try:
             return await coro_fn()
-        except CrustdataAPIError as exc:
+        except (CrustdataAPIError, ApifyAPIError) as exc:
             if exc.status_code == 429 and attempt < max_attempts - 1:
                 await asyncio.sleep(base_delay * (attempt + 1))
                 continue
             raise
+
+
+async def _fetch_posts(
+    client: httpx.AsyncClient,
+    date_from,
+    date_to,
+    *,
+    person_linkedin_url: Optional[str] = None,
+    company_linkedin_url: Optional[str] = None,
+):
+    """Recupera i post LinkedIn: usa Apify se APIFY_API_TOKEN è configurata
+    (più economico dei crediti Crustdata per post), altrimenti ricade su
+    Crustdata. Stessa forma di ritorno in entrambi i casi (vedi
+    apify_client.get_linkedin_posts_apify / crustdata_client.get_linkedin_posts)."""
+    if apify_client.is_configured():
+        return await apify_client.get_linkedin_posts_apify(
+            client,
+            date_from,
+            date_to,
+            person_linkedin_url=person_linkedin_url,
+            company_linkedin_url=company_linkedin_url,
+        )
+    return await get_linkedin_posts(
+        client,
+        date_from,
+        date_to,
+        person_linkedin_url=person_linkedin_url,
+        company_linkedin_url=company_linkedin_url,
+    )
 
 
 app = FastAPI(title="LinkedIn Post Finder - Backend")
@@ -324,8 +356,10 @@ async def _process_job(job_id: str):
                 posts = posts_cache[match.linkedin_url]
             else:
                 try:
-                    posts = await get_linkedin_posts(client, date_from, date_to, person_linkedin_url=match.linkedin_url)
-                except CrustdataAPIError as exc:
+                    posts = await _with_rate_limit_retry(
+                        lambda: _fetch_posts(client, date_from, date_to, person_linkedin_url=match.linkedin_url)
+                    )
+                except (CrustdataAPIError, ApifyAPIError) as exc:
                     summary["errors"] += 1
                     yield _sse("progress", {"index": idx, "total": total, "email": email, "message": f"Errore nel recupero dei post: {exc}"})
                     weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": f"Errore post: {exc}", "giorni": giorni})
@@ -442,9 +476,9 @@ async def _process_company_job(job_id: str):
             else:
                 try:
                     posts = await _with_rate_limit_retry(
-                        lambda: get_linkedin_posts(client, date_from, date_to, company_linkedin_url=match.linkedin_url)
+                        lambda: _fetch_posts(client, date_from, date_to, company_linkedin_url=match.linkedin_url)
                     )
-                except CrustdataAPIError as exc:
+                except (CrustdataAPIError, ApifyAPIError) as exc:
                     summary["errors"] += 1
                     yield _sse("progress", {"index": idx, "total": total, "email": company, "message": f"Errore nel recupero dei post: {exc}"})
                     weekly_rows.append({**row_common, "profile_name": match.name, "profile_url": match.linkedin_url, "status_label": f"Errore post: {exc}", "giorni": giorni})
@@ -568,6 +602,7 @@ async def health():
     return {
         "status": "ok",
         "crustdata_api_key_configured": has_key,
+        "apify_api_token_configured": apify_client.is_configured(),
         "gemini_api_key_configured": bool(os.environ.get("GEMINI_API_KEY")),
         "password_protected": bool(APP_PASSWORD),
     }
