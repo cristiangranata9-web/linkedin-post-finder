@@ -245,66 +245,62 @@ async def resolve_email_to_profile(client: httpx.AsyncClient, email: str) -> Res
     return result
 
 
-async def v2_company_enrich(client: httpx.AsyncClient, company_name: str) -> ResolutionResult:
+async def v2_company_identify(client: httpx.AsyncClient, company_name: str) -> ResolutionResult:
     """
-    POST /company/enrich (v2, 2025-11-01) - risoluzione nome azienda -> pagina
+    POST /company/identify (v2, 2025-11-01) - risoluzione nome azienda -> pagina
     LinkedIn aziendale.
 
-    Verificato con chiamate reali durante lo sviluppo (nomi come
-    "Assopellettieri" e "FederlegnoArredo" risolti correttamente in un unico
-    match; "Confindustria Nautica" ha prodotto un match ambiguo con l'entità
-    generica "Confindustria", gestito qui allo stesso modo di un match
-    ambiguo email->persona). Il nome del parametro per il nome azienda è
-    "names" (confermato dal messaggio di errore restituito dall'API stessa:
-    "Exactly one identifier must be provided: names, domains,
-    professional_network_profile_urls, or crustdata_company_ids"). Come per
-    v1_person_enrich, un eventuale 404 viene segnalato esplicitamente come
-    "endpoint/schema da verificare", mai confuso con "azienda non trovata".
+    Verificato con una chiamata reale: corpo `{"names": [...]}`, risposta
+    `[{"matched_on": ..., "match_type": ..., "matches": [{"confidence_score":
+    ..., "company_data": {"basic_info": {"professional_network_url": ...}}}]}]`.
+    Il campo con l'URL LinkedIn è `professional_network_url` dentro
+    `basic_info` (non `linkedin_url`/`linkedin_profile_url` come in una
+    versione precedente di questo codice, che causava falsi "non trovato").
+    Come per v1_person_enrich, un eventuale 404 viene segnalato esplicitamente
+    come "endpoint/schema da verificare", mai confuso con "azienda non trovata".
     """
-    url = f"{CRUSTDATA_BASE_URL}/company/enrich"
+    url = f"{CRUSTDATA_BASE_URL}/company/identify"
     body = {
         "names": [company_name],
-        "fields": ["basic_info"],
     }
     try:
         resp = await client.post(url, headers=_headers(v2=True), json=body, timeout=30.0)
     except httpx.RequestError as exc:
-        raise CrustdataAPIError(f"Errore di rete chiamando v2 /company/enrich: {exc}") from exc
+        raise CrustdataAPIError(f"Errore di rete chiamando v2 /company/identify: {exc}") from exc
 
     if resp.status_code == 404:
         raise CrustdataAPIError(
-            "v2 /company/enrich: endpoint non trovato (404). Lo schema del corpo "
-            "della richiesta per la risoluzione per nome non è confermato al 100% "
-            "sulla documentazione pubblica: verificare con il supporto/documentazione "
-            "Crustdata dell'account.",
+            "v2 /company/identify: endpoint non trovato (404). Verificare con il "
+            "supporto/documentazione Crustdata dell'account.",
             status_code=404,
         )
     if resp.status_code in (401, 403):
         raise CrustdataAPIError(
-            f"v2 /company/enrich: autenticazione rifiutata ({resp.status_code}). "
+            f"v2 /company/identify: autenticazione rifiutata ({resp.status_code}). "
             "Verificare CRUSTDATA_API_KEY.",
             status_code=resp.status_code,
         )
+    if resp.status_code == 429:
+        raise CrustdataAPIError(
+            "v2 /company/identify: rate limit superato. Riprovare più tardi o "
+            "contattare Crustdata per aumentare il limite.",
+            status_code=429,
+        )
     if resp.status_code >= 400:
         raise CrustdataAPIError(
-            f"v2 /company/enrich: errore HTTP {resp.status_code}: {resp.text[:300]}",
+            f"v2 /company/identify: errore HTTP {resp.status_code}: {resp.text[:300]}",
             status_code=resp.status_code,
         )
 
     data = resp.json()
-    entries = data if isinstance(data, list) else data.get("results", [data] if "matches" in data else [])
+    entries = data if isinstance(data, list) else [data]
     matches: list[ProfileMatch] = []
     for entry in entries:
         for m in entry.get("matches", []):
             company = m.get("company_data", {}) or {}
             basic = company.get("basic_info", {}) or {}
-            profile_url = (
-                basic.get("linkedin_url")
-                or basic.get("linkedin_profile_url")
-                or company.get("linkedin_url")
-                or company.get("company_linkedin_url")
-            )
-            name = basic.get("name") or company.get("company_name")
+            profile_url = basic.get("professional_network_url")
+            name = basic.get("name") or basic.get("profile_name")
             if profile_url:
                 matches.append(
                     ProfileMatch(
@@ -315,17 +311,17 @@ async def v2_company_enrich(client: httpx.AsyncClient, company_name: str) -> Res
                 )
 
     if not matches:
-        return ResolutionResult(status="not_found", matches=[], source="v2_company_enrich")
+        return ResolutionResult(status="not_found", matches=[], source="v2_company_identify")
 
     if len(matches) == 1:
         m = matches[0]
         if m.confidence is not None and m.confidence < MIN_CONFIDENCE:
-            return ResolutionResult(status="ambiguous", matches=matches, source="v2_company_enrich")
-        return ResolutionResult(status="resolved", matches=matches, source="v2_company_enrich")
+            return ResolutionResult(status="ambiguous", matches=matches, source="v2_company_identify")
+        return ResolutionResult(status="resolved", matches=matches, source="v2_company_identify")
 
     # Più match: non scegliamo arbitrariamente (es. "Confindustria Nautica"
     # che matcha anche la generica "Confindustria").
-    return ResolutionResult(status="ambiguous", matches=matches, source="v2_company_enrich")
+    return ResolutionResult(status="ambiguous", matches=matches, source="v2_company_identify")
 
 
 async def resolve_company_to_profile(client: httpx.AsyncClient, company_name: str) -> ResolutionResult:
@@ -336,10 +332,10 @@ async def resolve_company_to_profile(client: httpx.AsyncClient, company_name: st
     "ambiguous", mai un profilo scelto arbitrariamente.
     """
     try:
-        return await v2_company_enrich(client, company_name)
+        return await v2_company_identify(client, company_name)
     except CrustdataAPIError as exc:
         return ResolutionResult(
-            status="error", matches=[], source="v2_company_enrich", error_message=str(exc)
+            status="error", matches=[], source="v2_company_identify", error_message=str(exc)
         )
 
 
